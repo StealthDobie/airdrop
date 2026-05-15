@@ -27,8 +27,8 @@ pub fn discover_holders(
         let largest = rpc.get_token_largest_accounts(&target_token.token_address)?;
         for (index, balance) in largest.into_iter().enumerate() {
             let rank = index + 1;
-            match verify_candidate_token_account(rpc, &target_token.token_address, balance, rank) {
-                Ok(candidate) => {
+            match verify_candidate_token_account(rpc, &target_token.token_address, balance, rank)? {
+                CandidateVerification::Verified(candidate) => {
                     if let Some(reason) = exclusion_reason(
                         rpc,
                         &candidate.owner_wallet,
@@ -52,7 +52,7 @@ pub fn discover_holders(
                             holdings: vec![candidate.holding],
                         });
                 }
-                Err(skip) => skipped.push(skip),
+                CandidateVerification::Skipped(skip) => skipped.push(skip),
             }
         }
     }
@@ -139,48 +139,48 @@ fn verify_candidate_token_account(
     expected_target_token: &Pubkey,
     balance: TokenAccountBalance,
     rank: usize,
-) -> Result<VerifiedCandidate, SkippedCandidate> {
+) -> Result<CandidateVerification, DiscoveryError> {
     if parse_raw_amount(&balance.amount).unwrap_or(0) == 0 {
-        return Err(SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::ZeroBalance,
+        return Ok(CandidateVerification::Skipped(
+            SkippedCandidate::from_balance(
+                expected_target_token,
+                &balance,
+                rank,
+                SkipReason::ZeroBalance,
+            ),
         ));
     }
 
-    let Some(account) = rpc.get_account(&balance.token_account).map_err(|_| {
-        SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::TokenAccountLookupFailed,
-        )
-    })?
-    else {
-        return Err(SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::MissingTokenAccount,
+    let Some(account) = rpc.get_account(&balance.token_account)? else {
+        return Ok(CandidateVerification::Skipped(
+            SkippedCandidate::from_balance(
+                expected_target_token,
+                &balance,
+                rank,
+                SkipReason::MissingTokenAccount,
+            ),
         ));
     };
 
     if account.executable {
-        return Err(SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::ExecutableTokenAccount,
+        return Ok(CandidateVerification::Skipped(
+            SkippedCandidate::from_balance(
+                expected_target_token,
+                &balance,
+                rank,
+                SkipReason::ExecutableTokenAccount,
+            ),
         ));
     }
 
     if account.owner_program != token_program_id() {
-        return Err(SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::UnsupportedTokenProgram,
+        return Ok(CandidateVerification::Skipped(
+            SkippedCandidate::from_balance(
+                expected_target_token,
+                &balance,
+                rank,
+                SkipReason::UnsupportedTokenProgram,
+            ),
         ));
     }
 
@@ -191,33 +191,39 @@ fn verify_candidate_token_account(
         decimals,
     }) = account.parsed
     else {
-        return Err(SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::MalformedTokenAccount,
+        return Ok(CandidateVerification::Skipped(
+            SkippedCandidate::from_balance(
+                expected_target_token,
+                &balance,
+                rank,
+                SkipReason::MalformedTokenAccount,
+            ),
         ));
     };
 
     if mint != *expected_target_token {
-        return Err(SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::TokenMintMismatch,
+        return Ok(CandidateVerification::Skipped(
+            SkippedCandidate::from_balance(
+                expected_target_token,
+                &balance,
+                rank,
+                SkipReason::TokenMintMismatch,
+            ),
         ));
     }
 
     if parse_raw_amount(&amount).unwrap_or(0) == 0 {
-        return Err(SkippedCandidate::from_balance(
-            expected_target_token,
-            &balance,
-            rank,
-            SkipReason::ZeroBalance,
+        return Ok(CandidateVerification::Skipped(
+            SkippedCandidate::from_balance(
+                expected_target_token,
+                &balance,
+                rank,
+                SkipReason::ZeroBalance,
+            ),
         ));
     }
 
-    Ok(VerifiedCandidate {
+    Ok(CandidateVerification::Verified(VerifiedCandidate {
         owner_wallet: owner,
         rank,
         holding: TargetHolding {
@@ -227,7 +233,7 @@ fn verify_candidate_token_account(
             decimals,
             rank,
         },
-    })
+    }))
 }
 
 fn exclusion_reason(
@@ -323,6 +329,12 @@ struct VerifiedCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum CandidateVerification {
+    Verified(VerifiedCandidate),
+    Skipped(SkippedCandidate),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedCandidate {
     pub target_token_address: Pubkey,
     pub token_account: Pubkey,
@@ -361,7 +373,6 @@ impl SkippedCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     MissingTokenAccount,
-    TokenAccountLookupFailed,
     MalformedTokenAccount,
     ZeroBalance,
     TokenMintMismatch,
@@ -415,7 +426,7 @@ mod tests {
         super::*,
         crate::rpc::{RpcAccount, RpcTokenAccount, TokenAccountBalance},
         solana_keypair::{Keypair, Signer},
-        std::collections::HashMap,
+        std::collections::{HashMap, HashSet},
     };
 
     #[derive(Default)]
@@ -423,10 +434,18 @@ mod tests {
         accounts: HashMap<Pubkey, RpcAccount>,
         largest: HashMap<Pubkey, Vec<TokenAccountBalance>>,
         owned_token_accounts: HashMap<(Pubkey, Pubkey), Vec<RpcTokenAccount>>,
+        account_lookup_failures: HashSet<Pubkey>,
     }
 
     impl RpcReader for MockRpc {
         fn get_account(&self, address: &Pubkey) -> Result<Option<RpcAccount>, RpcError> {
+            if self.account_lookup_failures.contains(address) {
+                return Err(RpcError::Remote {
+                    method: "getAccountInfo",
+                    code: -32005,
+                    message: "mock RPC failure".to_owned(),
+                });
+            }
             Ok(self.accounts.get(address).cloned())
         }
 
@@ -662,6 +681,46 @@ mod tests {
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].owner_wallet, Some(owner_two));
         assert_eq!(report.skipped[0].reason, SkipReason::RecipientLimit);
+    }
+
+    #[test]
+    fn fails_discovery_when_candidate_token_account_lookup_fails() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let token_account_address = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.account_lookup_failures.insert(token_account_address);
+        rpc.largest
+            .insert(target, vec![balance(token_account_address, "100", 6)]);
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 100,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: false,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let err = discover_holders(&rpc, &config, &source_wallet).unwrap_err();
+
+        assert!(matches!(
+            err,
+            DiscoveryError::Rpc(RpcError::Remote {
+                method: "getAccountInfo",
+                code: -32005,
+                ..
+            })
+        ));
     }
 
     fn skipped_reasons(report: &DiscoveryReport) -> Vec<SkipReason> {
