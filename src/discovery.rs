@@ -4,7 +4,7 @@ use {
         rpc::{ParsedAccount, RpcError, RpcReader, TokenAccountBalance, parse_raw_amount},
     },
     solana_pubkey::Pubkey,
-    std::{collections::BTreeMap, str::FromStr},
+    std::{cmp::Ordering, collections::BTreeMap, str::FromStr},
     thiserror::Error,
 };
 
@@ -58,11 +58,7 @@ pub fn discover_holders(
     }
 
     let mut recipients: Vec<_> = recipients.into_values().collect();
-    recipients.sort_by(|left, right| {
-        left.best_rank
-            .cmp(&right.best_rank)
-            .then_with(|| left.wallet.to_string().cmp(&right.wallet.to_string()))
-    });
+    recipients.sort_by(compare_recipient_order);
 
     if recipients.len() > config.max_recipients {
         let over_limit = recipients.split_off(config.max_recipients);
@@ -88,6 +84,49 @@ pub fn discover_holders(
         recipients,
         skipped,
     })
+}
+
+fn compare_recipient_order(left: &DiscoveredRecipient, right: &DiscoveredRecipient) -> Ordering {
+    left.best_rank
+        .cmp(&right.best_rank)
+        .then_with(|| compare_aggregate_balances_desc(left, right))
+        .then_with(|| left.wallet.to_string().cmp(&right.wallet.to_string()))
+}
+
+fn compare_aggregate_balances_desc(
+    left: &DiscoveredRecipient,
+    right: &DiscoveredRecipient,
+) -> Ordering {
+    let scale = left
+        .holdings
+        .iter()
+        .chain(right.holdings.iter())
+        .map(|holding| holding.decimals)
+        .max()
+        .unwrap_or(0);
+    let Some(left_amount) = aggregate_scaled_amount(left, scale) else {
+        return Ordering::Equal;
+    };
+    let Some(right_amount) = aggregate_scaled_amount(right, scale) else {
+        return Ordering::Equal;
+    };
+
+    right_amount.cmp(&left_amount)
+}
+
+fn aggregate_scaled_amount(recipient: &DiscoveredRecipient, scale: u8) -> Option<u128> {
+    recipient
+        .holdings
+        .iter()
+        .try_fold(0_u128, |total, holding| {
+            let amount = parse_raw_amount(&holding.raw_amount)?;
+            let factor = checked_pow10(scale.checked_sub(holding.decimals)?)?;
+            total.checked_add(amount.checked_mul(factor)?)
+        })
+}
+
+fn checked_pow10(exponent: u8) -> Option<u128> {
+    (0..exponent).try_fold(1_u128, |value, _| value.checked_mul(10))
 }
 
 pub fn validate_original_spl_mint(
@@ -680,6 +719,59 @@ mod tests {
         assert_eq!(report.recipients[0].wallet, owner_one);
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].owner_wallet, Some(owner_two));
+        assert_eq!(report.skipped[0].reason, SkipReason::RecipientLimit);
+    }
+
+    #[test]
+    fn breaks_rank_ties_by_aggregate_balance_before_recipient_limit() {
+        let distribution = pubkey();
+        let target_one = pubkey();
+        let target_two = pubkey();
+        let source_wallet = keypair_pubkey();
+        let smaller_owner = keypair_pubkey();
+        let larger_owner = keypair_pubkey();
+        let smaller_token_account = pubkey();
+        let larger_token_account = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target_one, mint_account(6));
+        rpc.accounts.insert(target_two, mint_account(6));
+        rpc.accounts.insert(smaller_owner, system_account());
+        rpc.accounts.insert(larger_owner, system_account());
+        rpc.accounts.insert(
+            smaller_token_account,
+            token_account(target_one, smaller_owner, "10", 6),
+        );
+        rpc.accounts.insert(
+            larger_token_account,
+            token_account(target_two, larger_owner, "100", 6),
+        );
+        rpc.largest
+            .insert(target_one, vec![balance(smaller_token_account, "10", 6)]);
+        rpc.largest
+            .insert(target_two, vec![balance(larger_token_account, "100", 6)]);
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target_one, target_two],
+            max_recipients: 1,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: false,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let report = discover_holders(&rpc, &config, &source_wallet).unwrap();
+
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, larger_owner);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].owner_wallet, Some(smaller_owner));
         assert_eq!(report.skipped[0].reason, SkipReason::RecipientLimit);
     }
 
