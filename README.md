@@ -8,6 +8,27 @@ Current status: implementation in progress.
 - [Example environment file](.env.example)
 - [Example config](config.example.toml)
 
+## Local dry run
+
+```bash
+cp .env.example .env
+cp config.example.toml config.toml
+```
+
+Fill `.env` with `SOLANA_RPC_URL` and exactly one source wallet key:
+
+- `SOURCE_PRIVATE_KEY_BASE58`
+- `SOURCE_PRIVATE_KEY_BASE64`
+
+Then populate `config.toml` with real target token addresses and run:
+
+```bash
+cargo run -- validate
+cargo run -- run
+```
+
+`run` is still dry-run only. It reads mainnet-beta state, discovers recipients, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, and writes artifacts under `runs/<run-id>/`. It does not sign or send transactions.
+
 ## Development
 
 ```bash

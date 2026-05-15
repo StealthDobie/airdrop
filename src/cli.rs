@@ -1,8 +1,14 @@
 use {
-    crate::{discovery::discover_holders, env::OsEnv, rpc::HttpRpcClient, runtime::RuntimeConfig},
+    crate::{
+        discovery::discover_holders,
+        env::OsEnv,
+        planning::{create_distribution_plan, write_plan_artifacts},
+        rpc::HttpRpcClient,
+        runtime::RuntimeConfig,
+    },
     anyhow::Context,
     clap::{Parser, Subcommand},
-    std::path::PathBuf,
+    std::path::{Path, PathBuf},
 };
 
 #[derive(Debug, Parser)]
@@ -37,14 +43,49 @@ pub fn run() -> anyhow::Result<()> {
             let rpc = HttpRpcClient::new(runtime.rpc_url.clone());
             let report =
                 discover_holders(&rpc, &runtime.config, &runtime.source_wallet.public_key())?;
-            println!("Discovery OK");
+            let plan = create_distribution_plan(
+                &rpc,
+                &runtime.config,
+                report,
+                &runtime.source_wallet.public_key(),
+            )?;
+            let artifacts = write_plan_artifacts(&plan, Path::new("runs"))?;
+
+            println!("Plan OK (dry run; no transactions sent)");
+            println!("Cluster: {}", plan.cluster_name);
+            println!("Source wallet: {}", plan.source_wallet);
+            println!("Source ATA: {}", plan.source_ata);
+            println!("Source balance: {}", plan.source_balance_ui);
+            println!("Distribution token: {}", plan.distribution_token_address);
             println!(
-                "Distribution token: {}",
-                report.distribution_token.token_address
+                "Total distribution: {} (raw {})",
+                plan.total_amount_ui, plan.total_amount_raw
             );
-            println!("Target tokens: {}", report.target_tokens.len());
-            println!("Recipients discovered: {}", report.recipients.len());
-            println!("Skipped candidates: {}", report.skipped.len());
+            println!("Recipients: {}", plan.recipients.len());
+            println!(
+                "Amount per recipient: {} (raw {})",
+                plan.amount_per_recipient_ui, plan.amount_per_recipient_raw
+            );
+            println!(
+                "Remainder left in source wallet: {} (raw {})",
+                plan.remainder_ui, plan.remainder_raw
+            );
+            println!("Planned transactions: {}", plan.batches.len());
+            println!("Recipient ATAs to create: {}", plan.ata_creations());
+            println!(
+                "Estimated signature fees: {} lamports",
+                plan.estimated_signature_fee_lamports
+            );
+            println!(
+                "Estimated ATA rent exposure: {} lamports",
+                plan.estimated_ata_rent_lamports
+            );
+            println!("Skipped candidates: {}", plan.skipped.len());
+            for (reason, count) in plan.skipped_counts_by_reason() {
+                println!("  {reason}: {count}");
+            }
+            println!("Plan artifacts: {}", artifacts.run_dir.display());
+            println!("Ledger: {}", artifacts.ledger_path.display());
             Ok(())
         }
     }

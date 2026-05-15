@@ -21,6 +21,7 @@ pub trait RpcReader {
         owner: &Pubkey,
         mint: &Pubkey,
     ) -> Result<Vec<RpcTokenAccount>, RpcError>;
+    fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64, RpcError>;
 }
 
 #[derive(Debug, Clone)]
@@ -41,18 +42,26 @@ impl HttpRpcClient {
         }
     }
 
-    fn request<T: DeserializeOwned>(
+    fn request_context_value<T: DeserializeOwned>(
         &self,
         method: &'static str,
         params: Value,
     ) -> Result<RpcValue<T>, RpcError> {
+        self.request(method, params)
+    }
+
+    fn request<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<T, RpcError> {
         let request = RpcRequest {
             jsonrpc: "2.0",
             id: 1,
             method,
             params,
         };
-        let response: RpcEnvelope<RpcValue<T>> = self
+        let response: RpcEnvelope<T> = self
             .client
             .post(&self.endpoint)
             .json(&request)
@@ -86,7 +95,7 @@ impl HttpRpcClient {
 
 impl RpcReader for HttpRpcClient {
     fn get_account(&self, address: &Pubkey) -> Result<Option<RpcAccount>, RpcError> {
-        let response = self.request::<Option<JsonAccount>>(
+        let response = self.request_context_value::<Option<JsonAccount>>(
             "getAccountInfo",
             json!([
                 address.to_string(),
@@ -111,7 +120,7 @@ impl RpcReader for HttpRpcClient {
         &self,
         mint: &Pubkey,
     ) -> Result<Vec<TokenAccountBalance>, RpcError> {
-        let response = self.request::<Vec<JsonTokenAccountBalance>>(
+        let response = self.request_context_value::<Vec<JsonTokenAccountBalance>>(
             "getTokenLargestAccounts",
             json!([
                 mint.to_string(),
@@ -133,7 +142,7 @@ impl RpcReader for HttpRpcClient {
         owner: &Pubkey,
         mint: &Pubkey,
     ) -> Result<Vec<RpcTokenAccount>, RpcError> {
-        let response = self.request::<Vec<JsonTokenAccountWithPubkey>>(
+        let response = self.request_context_value::<Vec<JsonTokenAccountWithPubkey>>(
             "getTokenAccountsByOwner",
             json!([
                 owner.to_string(),
@@ -152,6 +161,18 @@ impl RpcReader for HttpRpcClient {
             .into_iter()
             .map(RpcTokenAccount::try_from)
             .collect()
+    }
+
+    fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64, RpcError> {
+        self.request(
+            "getMinimumBalanceForRentExemption",
+            json!([
+                data_len,
+                {
+                    "commitment": CONFIRMED_COMMITMENT
+                }
+            ]),
+        )
     }
 }
 
