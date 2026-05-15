@@ -2,11 +2,13 @@ use {
     serde::{Deserialize, Serialize, de::DeserializeOwned},
     serde_json::{Value, json},
     solana_pubkey::Pubkey,
-    std::str::FromStr,
+    std::{str::FromStr, time::Duration},
     thiserror::Error,
 };
 
 const CONFIRMED_COMMITMENT: &str = "confirmed";
+const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub trait RpcReader {
     fn get_account(&self, address: &Pubkey) -> Result<Option<RpcAccount>, RpcError>;
@@ -31,7 +33,11 @@ impl HttpRpcClient {
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .connect_timeout(RPC_CONNECT_TIMEOUT)
+                .timeout(RPC_REQUEST_TIMEOUT)
+                .build()
+                .expect("valid RPC HTTP client timeout configuration"),
         }
     }
 
@@ -474,6 +480,15 @@ mod tests {
         assert_eq!(parse_raw_amount("123"), Some(123));
         assert_eq!(parse_raw_amount(""), None);
         assert_eq!(parse_raw_amount("1.23"), None);
+    }
+
+    #[test]
+    fn constructs_http_client_with_fixed_timeouts() {
+        let client = HttpRpcClient::new("https://api.mainnet-beta.solana.com");
+
+        assert_eq!(client.endpoint, "https://api.mainnet-beta.solana.com");
+        assert_eq!(RPC_CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(RPC_REQUEST_TIMEOUT, Duration::from_secs(30));
     }
 
     fn token_program_id() -> Pubkey {

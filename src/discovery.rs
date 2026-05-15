@@ -111,22 +111,65 @@ fn compare_aggregate_balances_desc(
         return Ordering::Equal;
     };
 
-    right_amount.cmp(&left_amount)
+    compare_decimal_strings(&right_amount, &left_amount)
 }
 
-fn aggregate_scaled_amount(recipient: &DiscoveredRecipient, scale: u8) -> Option<u128> {
-    recipient
-        .holdings
-        .iter()
-        .try_fold(0_u128, |total, holding| {
-            let amount = parse_raw_amount(&holding.raw_amount)?;
-            let factor = checked_pow10(scale.checked_sub(holding.decimals)?)?;
-            total.checked_add(amount.checked_mul(factor)?)
-        })
+fn aggregate_scaled_amount(recipient: &DiscoveredRecipient, scale: u8) -> Option<String> {
+    let mut total = "0".to_owned();
+    for holding in &recipient.holdings {
+        let shift = usize::from(scale.checked_sub(holding.decimals)?);
+        let amount = scale_raw_amount_string(&holding.raw_amount, shift)?;
+        total = add_decimal_strings(&total, &amount);
+    }
+
+    Some(total)
 }
 
-fn checked_pow10(exponent: u8) -> Option<u128> {
-    (0..exponent).try_fold(1_u128, |value, _| value.checked_mul(10))
+fn scale_raw_amount_string(raw_amount: &str, zero_count: usize) -> Option<String> {
+    if raw_amount.is_empty() || !raw_amount.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    let trimmed = raw_amount.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some("0".to_owned());
+    }
+
+    let mut scaled = String::with_capacity(trimmed.len() + zero_count);
+    scaled.push_str(trimmed);
+    scaled.extend(std::iter::repeat_n('0', zero_count));
+    Some(scaled)
+}
+
+fn add_decimal_strings(left: &str, right: &str) -> String {
+    let mut carry = 0_u8;
+    let mut digits = Vec::with_capacity(left.len().max(right.len()) + 1);
+    let mut left_digits = left.as_bytes().iter().rev();
+    let mut right_digits = right.as_bytes().iter().rev();
+
+    loop {
+        let left_digit = left_digits.next().map(|digit| digit - b'0');
+        let right_digit = right_digits.next().map(|digit| digit - b'0');
+
+        if left_digit.is_none() && right_digit.is_none() && carry == 0 {
+            break;
+        }
+
+        let sum = left_digit.unwrap_or(0) + right_digit.unwrap_or(0) + carry;
+        digits.push(char::from(b'0' + (sum % 10)));
+        carry = sum / 10;
+    }
+
+    digits.into_iter().rev().collect()
+}
+
+fn compare_decimal_strings(left: &str, right: &str) -> Ordering {
+    let left = left.trim_start_matches('0');
+    let right = right.trim_start_matches('0');
+    let left = if left.is_empty() { "0" } else { left };
+    let right = if right.is_empty() { "0" } else { right };
+
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
 }
 
 pub fn validate_original_spl_mint(
@@ -776,6 +819,62 @@ mod tests {
     }
 
     #[test]
+    fn breaks_high_decimal_rank_ties_without_overflowing() {
+        let distribution = pubkey();
+        let high_decimal_target = pubkey();
+        let low_decimal_target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let (smaller_owner, larger_owner) = lexicographically_ordered_keypair_pubkeys();
+        let smaller_token_account = pubkey();
+        let larger_token_account = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(high_decimal_target, mint_account(250));
+        rpc.accounts.insert(low_decimal_target, mint_account(0));
+        rpc.accounts.insert(smaller_owner, system_account());
+        rpc.accounts.insert(larger_owner, system_account());
+        rpc.accounts.insert(
+            smaller_token_account,
+            token_account(high_decimal_target, smaller_owner, "1", 250),
+        );
+        rpc.accounts.insert(
+            larger_token_account,
+            token_account(low_decimal_target, larger_owner, "1", 0),
+        );
+        rpc.largest.insert(
+            high_decimal_target,
+            vec![balance(smaller_token_account, "1", 250)],
+        );
+        rpc.largest.insert(
+            low_decimal_target,
+            vec![balance(larger_token_account, "1", 0)],
+        );
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![high_decimal_target, low_decimal_target],
+            max_recipients: 1,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: false,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let report = discover_holders(&rpc, &config, &source_wallet).unwrap();
+
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, larger_owner);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].owner_wallet, Some(smaller_owner));
+        assert_eq!(report.skipped[0].reason, SkipReason::RecipientLimit);
+    }
+
+    #[test]
     fn fails_discovery_when_candidate_token_account_lookup_fails() {
         let distribution = pubkey();
         let target = pubkey();
@@ -878,5 +977,18 @@ mod tests {
 
     fn keypair_pubkey() -> Pubkey {
         Keypair::new().pubkey()
+    }
+
+    fn lexicographically_ordered_keypair_pubkeys() -> (Pubkey, Pubkey) {
+        loop {
+            let left = keypair_pubkey();
+            let right = keypair_pubkey();
+            if left.to_string() < right.to_string() {
+                return (left, right);
+            }
+            if right.to_string() < left.to_string() {
+                return (right, left);
+            }
+        }
     }
 }
