@@ -549,6 +549,13 @@ mod tests {
                 .cloned()
                 .unwrap_or_default())
         }
+
+        fn get_minimum_balance_for_rent_exemption(
+            &self,
+            _data_len: usize,
+        ) -> Result<u64, RpcError> {
+            Ok(2_039_280)
+        }
     }
 
     #[test]
