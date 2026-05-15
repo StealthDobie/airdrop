@@ -1,0 +1,15 @@
+[package]
+name = "airdrop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22.1"
+clap = { version = "4.6.1", features = ["derive"] }
+dotenvy = "0.15.7"
+serde = { version = "1.0", features = ["derive"] }
+solana-keypair = "3.1.2"
+solana-pubkey = "4.2.0"
+thiserror = "2.0.18"
+toml = "1.1.2"
