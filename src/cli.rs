@@ -1,5 +1,5 @@
 use {
-    crate::{env::OsEnv, runtime::RuntimeConfig},
+    crate::{discovery::discover_holders, env::OsEnv, rpc::HttpRpcClient, runtime::RuntimeConfig},
     anyhow::Context,
     clap::{Parser, Subcommand},
     std::path::PathBuf,
@@ -33,17 +33,25 @@ pub fn run() -> anyhow::Result<()> {
     match cli.command {
         Command::Validate { config } => validate(config),
         Command::Run { config } => {
-            validate(config)?;
-            println!("Run inputs are valid. Holder discovery begins in slice 2.");
+            let runtime = load_runtime(config)?;
+            let rpc = HttpRpcClient::new(runtime.rpc_url.clone());
+            let report =
+                discover_holders(&rpc, &runtime.config, &runtime.source_wallet.public_key())?;
+            println!("Discovery OK");
+            println!(
+                "Distribution token: {}",
+                report.distribution_token.token_address
+            );
+            println!("Target tokens: {}", report.target_tokens.len());
+            println!("Recipients discovered: {}", report.recipients.len());
+            println!("Skipped candidates: {}", report.skipped.len());
             Ok(())
         }
     }
 }
 
 fn validate(config_path: PathBuf) -> anyhow::Result<()> {
-    let env = OsEnv;
-    let runtime = RuntimeConfig::from_path_and_env(&config_path, &env)
-        .with_context(|| format!("failed to load {}", config_path.display()))?;
+    let runtime = load_runtime(config_path)?;
 
     println!("Config OK");
     println!("Cluster: {}", runtime.config.cluster_name);
@@ -60,4 +68,10 @@ fn validate(config_path: PathBuf) -> anyhow::Result<()> {
     println!("Max recipients: {}", runtime.config.max_recipients);
 
     Ok(())
+}
+
+fn load_runtime(config_path: PathBuf) -> anyhow::Result<RuntimeConfig> {
+    let env = OsEnv;
+    RuntimeConfig::from_path_and_env(&config_path, &env)
+        .with_context(|| format!("failed to load {}", config_path.display()))
 }
