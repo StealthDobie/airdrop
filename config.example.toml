@@ -1,0 +1,19 @@
+[cluster]
+name = "mainnet-beta"
+rpc_url_env = "SOLANA_RPC_URL"
+
+[distribution]
+token_address = "J3mfHoQb27xHL1xUYsoPfU1vZHbzCeK7fZYvsWeYdoge"
+total_amount_ui = "1000000"
+
+[targeting]
+target_token_addresses = [
+  "TARGET_TOKEN_ADDRESS_1",
+  "TARGET_TOKEN_ADDRESS_2"
+]
+max_recipients = 100
+manual_exclude_wallets = []
+
+[providers.solscan]
+enabled = false
+api_key_env = "SOLSCAN_API_KEY"
