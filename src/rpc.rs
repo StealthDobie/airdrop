@@ -46,6 +46,12 @@ pub trait RpcSimulator {
     ) -> Result<TransactionSimulation, RpcError>;
 }
 
+pub trait RpcSender {
+    fn get_balance(&self, address: &Pubkey) -> Result<u64, RpcError>;
+    fn send_transaction(&self, encoded_transaction: &str) -> Result<String, RpcError>;
+    fn get_signature_status(&self, signature: &str) -> Result<Option<SignatureStatus>, RpcError>;
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpRpcClient {
     endpoint: String,
@@ -307,12 +313,70 @@ impl RpcSimulator for HttpRpcClient {
     }
 }
 
+impl RpcSender for HttpRpcClient {
+    fn get_balance(&self, address: &Pubkey) -> Result<u64, RpcError> {
+        let response = self.request_context_value::<u64>(
+            "getBalance",
+            json!([
+                address.to_string(),
+                {
+                    "commitment": CONFIRMED_COMMITMENT
+                }
+            ]),
+        )?;
+
+        Ok(response.value)
+    }
+
+    fn send_transaction(&self, encoded_transaction: &str) -> Result<String, RpcError> {
+        self.request(
+            "sendTransaction",
+            json!([encoded_transaction, send_transaction_request_config()]),
+        )
+    }
+
+    fn get_signature_status(&self, signature: &str) -> Result<Option<SignatureStatus>, RpcError> {
+        let response = self.request_context_value::<Vec<Option<JsonSignatureStatus>>>(
+            "getSignatureStatuses",
+            json!([
+                [signature],
+                {
+                    "searchTransactionHistory": true
+                }
+            ]),
+        )?;
+
+        if response.value.len() != 1 {
+            return Err(RpcError::InvalidResponseLength {
+                method: "getSignatureStatuses",
+                expected: 1,
+                actual: response.value.len(),
+            });
+        }
+
+        Ok(response
+            .value
+            .into_iter()
+            .next()
+            .flatten()
+            .map(SignatureStatus::from))
+    }
+}
+
 fn simulation_request_config() -> Value {
     json!({
         "encoding": "base64",
         "commitment": CONFIRMED_COMMITMENT,
         "sigVerify": false,
         "replaceRecentBlockhash": true
+    })
+}
+
+fn send_transaction_request_config() -> Value {
+    json!({
+        "encoding": "base64",
+        "skipPreflight": false,
+        "preflightCommitment": CONFIRMED_COMMITMENT
     })
 }
 
@@ -360,6 +424,14 @@ pub struct TransactionSimulation {
     pub err: Option<Value>,
     pub logs: Vec<String>,
     pub units_consumed: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureStatus {
+    pub slot: u64,
+    pub status: Option<Value>,
+    pub confirmation_status: Option<String>,
+    pub err: Option<Value>,
 }
 
 #[derive(Debug, Error)]
@@ -505,6 +577,26 @@ struct JsonTransactionSimulation {
     logs: Option<Vec<String>>,
     #[serde(rename = "unitsConsumed")]
     units_consumed: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonSignatureStatus {
+    slot: u64,
+    err: Option<Value>,
+    status: Option<Value>,
+    #[serde(rename = "confirmationStatus")]
+    confirmation_status: Option<String>,
+}
+
+impl From<JsonSignatureStatus> for SignatureStatus {
+    fn from(value: JsonSignatureStatus) -> Self {
+        Self {
+            slot: value.slot,
+            status: value.status,
+            confirmation_status: value.confirmation_status,
+            err: value.err,
+        }
+    }
 }
 
 impl TryFrom<JsonAccount> for RpcAccount {
@@ -727,6 +819,37 @@ mod tests {
         assert_eq!(config["commitment"], "confirmed");
         assert_eq!(config["sigVerify"], false);
         assert_eq!(config["replaceRecentBlockhash"], true);
+    }
+
+    #[test]
+    fn send_transaction_request_uses_confirmed_preflight() {
+        let config = send_transaction_request_config();
+
+        assert_eq!(config["encoding"], "base64");
+        assert_eq!(config["skipPreflight"], false);
+        assert_eq!(config["preflightCommitment"], "confirmed");
+    }
+
+    #[test]
+    fn parses_signature_status() {
+        let response: RpcValue<Vec<Option<JsonSignatureStatus>>> = serde_json::from_value(json!({
+            "context": {
+                "slot": 123
+            },
+            "value": [{
+                "slot": 120,
+                "confirmations": 1,
+                "confirmationStatus": "confirmed",
+                "err": null
+            }]
+        }))
+        .unwrap();
+
+        let status = SignatureStatus::from(response.value.into_iter().next().unwrap().unwrap());
+
+        assert_eq!(status.slot, 120);
+        assert_eq!(status.confirmation_status.as_deref(), Some("confirmed"));
+        assert_eq!(status.err, None);
     }
 
     #[test]

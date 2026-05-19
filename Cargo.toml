@@ -17,7 +17,7 @@ solana-instruction = "3.0.0"
 solana-keypair = "3.1.2"
 solana-message = { version = "4.0.0", features = ["serde"] }
 solana-pubkey = { version = "4.2.0", features = ["curve25519"] }
-solana-transaction = { version = "4.0.0", features = ["serde"] }
+solana-transaction = { version = "4.0.0", features = ["serde", "wincode"] }
 spl-token-2022-interface = "3.0.0"
 thiserror = "2.0.18"
 toml = "1.1.2"
