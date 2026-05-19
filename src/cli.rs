@@ -120,12 +120,14 @@ pub fn run() -> anyhow::Result<()> {
             );
             println!("Recipient ATAs to create: {}", plan.ata_creations());
             println!(
-                "Estimated signature fees: {} lamports",
-                plan.estimated_signature_fee_lamports
+                "Estimated signature fees: {} lamports ({} SOL)",
+                plan.estimated_signature_fee_lamports,
+                format_lamports_as_sol(plan.estimated_signature_fee_lamports)
             );
             println!(
-                "Estimated ATA rent exposure: {} lamports",
-                plan.estimated_ata_rent_lamports
+                "Estimated ATA rent exposure: {} lamports ({} SOL)",
+                plan.estimated_ata_rent_lamports,
+                format_lamports_as_sol(plan.estimated_ata_rent_lamports)
             );
             println!("Skipped candidates: {}", plan.skipped.len());
             for (reason, count) in plan.skipped_counts_by_reason() {
@@ -175,4 +177,32 @@ fn load_runtime(config_path: PathBuf) -> anyhow::Result<RuntimeConfig> {
     let env = OsEnv;
     RuntimeConfig::from_path_and_env(&config_path, &env)
         .with_context(|| format!("failed to load {}", config_path.display()))
+}
+
+fn format_lamports_as_sol(lamports: u64) -> String {
+    const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
+    let whole = lamports / LAMPORTS_PER_SOL;
+    let fractional = lamports % LAMPORTS_PER_SOL;
+
+    if fractional == 0 {
+        return whole.to_string();
+    }
+
+    let fractional = format!("{fractional:09}").trim_end_matches('0').to_owned();
+    format!("{whole}.{fractional}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_lamports_as_sol_without_rounding() {
+        assert_eq!(format_lamports_as_sol(0), "0");
+        assert_eq!(format_lamports_as_sol(5_000), "0.000005");
+        assert_eq!(format_lamports_as_sol(185_000), "0.000185");
+        assert_eq!(format_lamports_as_sol(701_512_320), "0.70151232");
+        assert_eq!(format_lamports_as_sol(1_000_000_000), "1");
+        assert_eq!(format_lamports_as_sol(1_234_567_890), "1.23456789");
+    }
 }
