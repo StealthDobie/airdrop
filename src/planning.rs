@@ -64,6 +64,7 @@ pub fn create_distribution_plan(
         &report.distribution_token.token_address,
         &report.distribution_token.token_program,
     );
+    eprintln!("Reading source token account {}", source_ata);
     let source_balance_raw = read_required_token_account(
         rpc,
         &source_ata,
@@ -83,6 +84,10 @@ pub fn create_distribution_plan(
         });
     }
 
+    eprintln!(
+        "Planning recipient ATAs for {} recipient(s)",
+        recipient_count
+    );
     let recipient_inputs = report
         .recipients
         .into_iter()
@@ -99,6 +104,7 @@ pub fn create_distribution_plan(
         .iter()
         .map(|(_, recipient_ata)| *recipient_ata)
         .collect::<Vec<_>>();
+    eprintln!("Reading {} recipient ATA account(s)", recipient_atas.len());
     let recipient_ata_accounts = rpc.get_multiple_accounts(&recipient_atas)?;
 
     let mut seen_recipients = BTreeSet::new();
@@ -123,6 +129,10 @@ pub fn create_distribution_plan(
         )?);
     }
 
+    eprintln!(
+        "Packing {} planned recipient(s) into transactions",
+        planned_recipients.len()
+    );
     let batches = pack_recipients(
         &planned_recipients,
         source_wallet,

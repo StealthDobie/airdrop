@@ -41,8 +41,15 @@ pub fn run() -> anyhow::Result<()> {
         Command::Validate { config } => validate(config),
         Command::Run { config } => {
             let runtime = load_runtime(config)?;
+            eprintln!(
+                "Loaded config: cluster={}, targets={}, max_recipients={}",
+                runtime.config.cluster_name,
+                runtime.config.target_token_addresses.len(),
+                runtime.config.max_recipients
+            );
             let rpc = HttpRpcClient::new(runtime.rpc_url.clone());
             let report = if let Some(solscan_api_key) = runtime.solscan_api_key.as_deref() {
+                eprintln!("Starting holder discovery with Solscan");
                 let solscan = SolscanClient::new(solscan_api_key);
                 discover_holders_with_solscan(
                     &rpc,
@@ -51,14 +58,22 @@ pub fn run() -> anyhow::Result<()> {
                     &runtime.source_wallet.public_key(),
                 )?
             } else {
+                eprintln!("Starting holder discovery with RPC");
                 discover_holders(&rpc, &runtime.config, &runtime.source_wallet.public_key())?
             };
+            eprintln!(
+                "Discovery complete: recipients={}, skipped={}",
+                report.recipients.len(),
+                report.skipped.len()
+            );
+            eprintln!("Building dry-run distribution plan");
             let plan = create_distribution_plan(
                 &rpc,
                 &runtime.config,
                 report,
                 &runtime.source_wallet.public_key(),
             )?;
+            eprintln!("Writing plan artifacts");
             let artifacts = write_plan_artifacts(&plan, Path::new("runs"))?;
 
             println!("Plan OK (dry run; no transactions sent)");

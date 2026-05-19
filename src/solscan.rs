@@ -51,6 +51,11 @@ impl SolscanClient {
             return Ok(Vec::new());
         }
 
+        eprintln!(
+            "Solscan: fetching holders for {} (limit {})",
+            token_address,
+            display_limit(limit)
+        );
         let mut holders = Vec::with_capacity(limit.min(SOLSCAN_PAGE_SIZE));
         let mut page = 1_usize;
 
@@ -65,6 +70,19 @@ impl SolscanClient {
                     break;
                 }
             }
+
+            eprintln!(
+                "Solscan: {} page {} returned {} holder(s); collected {}/{}",
+                token_address,
+                page,
+                item_count,
+                holders.len(),
+                if total == 0 {
+                    display_limit(limit)
+                } else {
+                    total.to_string()
+                }
+            );
 
             if item_count == 0 || holders.len() >= total {
                 break;
@@ -289,6 +307,14 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
         .ok()
         .map(Duration::from_secs)
         .filter(|duration| !duration.is_zero())
+}
+
+fn display_limit(limit: usize) -> String {
+    if limit == usize::MAX {
+        "all".to_owned()
+    } else {
+        limit.to_string()
+    }
 }
 
 #[cfg(test)]

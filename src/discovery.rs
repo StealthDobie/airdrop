@@ -31,11 +31,19 @@ pub fn discover_holders_with_solscan(
     config: &ValidatedConfig,
     source_wallet: &Pubkey,
 ) -> Result<DiscoveryReport, DiscoveryError> {
+    eprintln!(
+        "Solscan: preloading existing distribution-token holders for {}",
+        config.distribution_token_address
+    );
     let existing_distribution_holders = solscan
         .get_all_token_holders(&config.distribution_token_address)?
         .into_iter()
         .filter_map(|holder| holder.owner_wallet)
         .collect::<BTreeSet<_>>();
+    eprintln!(
+        "Solscan: loaded {} existing distribution holder(s)",
+        existing_distribution_holders.len()
+    );
 
     discover_holders_with_provider(
         rpc,
@@ -53,13 +61,30 @@ fn discover_holders_with_provider(
     source_wallet: &Pubkey,
     existing_distribution_holders: Option<&BTreeSet<Pubkey>>,
 ) -> Result<DiscoveryReport, DiscoveryError> {
+    eprintln!(
+        "Validating distribution token {}",
+        config.distribution_token_address
+    );
     let distribution_token = validate_token_2022_mint(rpc, &config.distribution_token_address)?;
-    let target_tokens = config
-        .target_token_addresses
-        .iter()
-        .map(|token_address| validate_target_mint(rpc, token_address))
-        .collect::<Result<Vec<_>, _>>()?;
+    eprintln!(
+        "Validating {} target token(s)",
+        config.target_token_addresses.len()
+    );
+    let mut target_tokens = Vec::with_capacity(config.target_token_addresses.len());
+    for (index, token_address) in config.target_token_addresses.iter().enumerate() {
+        eprintln!(
+            "Validating target token {}/{}: {}",
+            index + 1,
+            config.target_token_addresses.len(),
+            token_address
+        );
+        target_tokens.push(validate_target_mint(rpc, token_address)?);
+    }
     let holder_fetch_limit = holder_fetch_limit(config.max_recipients, target_tokens.len());
+    eprintln!(
+        "Fetching up to {} ranked holder candidate(s) per target token",
+        holder_fetch_limit
+    );
 
     let mut recipients = BTreeMap::<Pubkey, DiscoveredRecipient>::new();
     let mut skipped = Vec::new();
@@ -70,10 +95,20 @@ fn discover_holders_with_provider(
             holder_provider.get_token_holders(&target_token.token_address, holder_fetch_limit)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    eprintln!("Holder candidate fetch complete");
 
     for index in 0..config.max_recipients {
         let mut saw_candidate_at_rank = false;
         let mut verified_at_rank = Vec::new();
+
+        if index == 0 || (index + 1) % 10 == 0 {
+            eprintln!(
+                "Verifying rank {} candidates; recipients={}, skipped={}",
+                index + 1,
+                recipients.len(),
+                skipped.len()
+            );
+        }
 
         for (target_token, holder_list) in target_tokens.iter().zip(&holder_lists) {
             let Some(balance) = holder_list.get(index) else {
@@ -121,11 +156,18 @@ fn discover_holders_with_provider(
         }
 
         if !saw_candidate_at_rank || recipients.len() >= config.max_recipients {
+            eprintln!(
+                "Stopping discovery at rank {}; recipients={}, skipped={}",
+                index + 1,
+                recipients.len(),
+                skipped.len()
+            );
             break;
         }
     }
 
     let mut recipients: Vec<_> = recipients.into_values().collect();
+    eprintln!("Ranking {} discovered recipient(s)", recipients.len());
     recipients.sort_by(compare_recipient_order);
 
     if recipients.len() > config.max_recipients {
