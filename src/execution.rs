@@ -30,7 +30,20 @@ pub fn confirmation_phrase(plan: &DistributionPlan) -> String {
 }
 
 pub fn confirmation_matches(input: &str, plan: &DistributionPlan) -> bool {
-    input.trim() == confirmation_phrase(plan)
+    let normalized = normalize_confirmation_input(input);
+    let mut parts = normalized.split_whitespace();
+
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some("SEND"), Some(count), None) if count == plan.recipients.len().to_string()
+    )
+}
+
+fn normalize_confirmation_input(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| !matches!(ch, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
+        .collect()
 }
 
 pub fn check_source_sol_funding(
@@ -705,7 +718,10 @@ mod tests {
 
         assert_eq!(confirmation_phrase(&plan), "SEND 0");
         assert!(confirmation_matches("SEND 0\n", &plan));
+        assert!(confirmation_matches("SEND\u{00a0}0\r\n", &plan));
+        assert!(confirmation_matches("\u{FEFF}SEND 0\u{200B}\n", &plan));
         assert!(!confirmation_matches("send 0", &plan));
+        assert!(!confirmation_matches("SEND 0 please", &plan));
     }
 
     #[test]

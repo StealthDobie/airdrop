@@ -15,7 +15,8 @@ use {
     anyhow::Context,
     clap::{Parser, Subcommand},
     std::{
-        io,
+        fs::File,
+        io::{self, BufRead, Write},
         path::{Path, PathBuf},
     },
 };
@@ -107,10 +108,13 @@ fn send(config: PathBuf, resume: Option<PathBuf>) -> anyhow::Result<()> {
         prepared.plan.recipients.len()
     );
     println!("Type `{phrase}` to send:");
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    io::stdout().flush()?;
+    let input = read_confirmation_line()?;
     if !confirmation_matches(&input, &prepared.plan) {
-        anyhow::bail!("confirmation phrase did not match; no transactions sent");
+        anyhow::bail!(
+            "confirmation phrase did not match; expected `{phrase}`, got `{}`; no transactions sent",
+            input.trim().escape_debug()
+        );
     }
 
     let report = send_plan(
@@ -135,6 +139,22 @@ fn send(config: PathBuf, resume: Option<PathBuf>) -> anyhow::Result<()> {
     }
     println!("Ledger: {}", prepared.artifacts.ledger_path.display());
     Ok(())
+}
+
+fn read_confirmation_line() -> io::Result<String> {
+    let mut input = String::new();
+
+    match File::open("/dev/tty") {
+        Ok(file) => {
+            let mut reader = io::BufReader::new(file);
+            reader.read_line(&mut input)?;
+        }
+        Err(_) => {
+            io::stdin().read_line(&mut input)?;
+        }
+    }
+
+    Ok(input)
 }
 
 fn prepare_run(config: PathBuf) -> anyhow::Result<PreparedRun> {
