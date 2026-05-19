@@ -12,9 +12,19 @@ const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RPC_MAX_ATTEMPTS: usize = 6;
 const RPC_INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const RPC_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
+const RPC_GET_MULTIPLE_ACCOUNTS_LIMIT: usize = 100;
 
 pub trait RpcReader {
     fn get_account(&self, address: &Pubkey) -> Result<Option<RpcAccount>, RpcError>;
+    fn get_multiple_accounts(
+        &self,
+        addresses: &[Pubkey],
+    ) -> Result<Vec<Option<RpcAccount>>, RpcError> {
+        addresses
+            .iter()
+            .map(|address| self.get_account(address))
+            .collect()
+    }
     fn get_token_largest_accounts(
         &self,
         mint: &Pubkey,
@@ -153,6 +163,48 @@ impl RpcReader for HttpRpcClient {
             })
     }
 
+    fn get_multiple_accounts(
+        &self,
+        addresses: &[Pubkey],
+    ) -> Result<Vec<Option<RpcAccount>>, RpcError> {
+        let mut accounts = Vec::with_capacity(addresses.len());
+
+        for chunk in addresses.chunks(RPC_GET_MULTIPLE_ACCOUNTS_LIMIT) {
+            let response = self.request_context_value::<Vec<Option<JsonAccount>>>(
+                "getMultipleAccounts",
+                json!([
+                    chunk.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    {
+                        "encoding": "jsonParsed",
+                        "commitment": CONFIRMED_COMMITMENT
+                    }
+                ]),
+            )?;
+
+            if response.value.len() != chunk.len() {
+                return Err(RpcError::InvalidResponseLength {
+                    method: "getMultipleAccounts",
+                    expected: chunk.len(),
+                    actual: response.value.len(),
+                });
+            }
+
+            for (address, account) in chunk.iter().zip(response.value) {
+                accounts.push(
+                    account
+                        .map(RpcAccount::try_from)
+                        .transpose()
+                        .map_err(|source| RpcError::InvalidAccount {
+                            address: *address,
+                            source,
+                        })?,
+                );
+            }
+        }
+
+        Ok(accounts)
+    }
+
     fn get_token_largest_accounts(
         &self,
         mint: &Pubkey,
@@ -240,6 +292,7 @@ pub enum ParsedAccount {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenAccountBalance {
     pub token_account: Pubkey,
+    pub owner_wallet: Option<Pubkey>,
     pub amount: String,
     pub decimals: u8,
     pub ui_amount_string: String,
@@ -278,6 +331,12 @@ pub enum RpcError {
     },
     #[error("RPC {method} returned no result")]
     MissingResult { method: &'static str },
+    #[error("RPC {method} returned {actual} result(s), expected {expected}")]
+    InvalidResponseLength {
+        method: &'static str,
+        expected: usize,
+        actual: usize,
+    },
     #[error("RPC returned invalid account `{address}`: {source}")]
     InvalidAccount {
         address: Pubkey,
@@ -444,6 +503,7 @@ impl TryFrom<JsonTokenAccountBalance> for TokenAccountBalance {
 
         Ok(Self {
             token_account: parse_pubkey("getTokenLargestAccounts.address", &value.address)?,
+            owner_wallet: None,
             amount: value.amount,
             decimals: value.decimals,
             ui_amount_string: value.ui_amount_string,

@@ -1,6 +1,6 @@
 # Airdrop CLI Specification
 
-Status: draft v0.6
+Status: draft v0.7
 Date: 2026-05-19
 Repository: `StealthDobie/airdrop`
 
@@ -23,8 +23,8 @@ The tool is an operator-run distribution workflow. It should preview the plan, r
 ## V0 Decisions
 
 - Use Rust and direct Solana RPC/SPL libraries, not shell calls to `solana` or `spl-token`.
-- Use Solana RPC for v0 holder discovery.
-- Keep Solscan as an optional future provider for larger holder lists.
+- Use Solana RPC for default v0 holder discovery.
+- Support Solscan as an optional holder-discovery provider when an API key is configured.
 - Use `confirmed` commitment for all reads, simulations, sends, and confirmations.
 - Use `TransferChecked` for token transfers.
 - Support only Token-2022 for the distribution token in v0. Target tokens may be legacy SPL or Token-2022 because they are only used for read-only holder discovery. If the distribution token is not Token-2022, or a target token is not owned by a supported token program, fail early with a clear unsupported-token-program message.
@@ -85,6 +85,7 @@ manual_exclude_wallets = []
 [providers.solscan]
 enabled = false
 api_key_env = "SOLSCAN_API_KEY"
+holder_fetch_limit = 100
 ```
 
 Settings intentionally not configurable in v0:
@@ -143,6 +144,12 @@ RPC v0 discovery limit:
 - RPC returns up to 20 token accounts per target token address.
 - If exclusions remove candidates, v0 does not backfill past those 20.
 - Larger campaigns should use the optional Solscan provider or another indexed provider later.
+
+Solscan discovery:
+
+- When `[providers.solscan].enabled = true`, load the API key from `SOLSCAN_API_KEY` by default.
+- Fetch holder pages from Solscan's `token/holders` endpoint up to `providers.solscan.holder_fetch_limit` ranked holders per target token. The default is `100`.
+- Treat Solscan as a candidate source only. The CLI still reads mint metadata, owner-account exclusions, source ATA state, and recipient ATA state through Solana RPC; when Solscan provides holder owners, the CLI can avoid per-candidate token-account lookups.
 
 Default recipient selection:
 
@@ -258,7 +265,7 @@ Before implementation is considered ready:
 - Unit tests for transaction auto-packing against serialized-size, account, and instruction limits.
 - Unit tests for plan math, including uneven totals and decimal conversion.
 - Mock RPC tests for target holder discovery and existing distribution-token holder exclusion.
-- Mock provider tests for Solscan only when Solscan support is implemented.
+- Unit tests for Solscan holder parsing and external-provider discovery.
 - Dry-run integration test against devnet or local validator with a test token.
 - Mainnet-beta read-only smoke test for holder discovery and source balance.
 
@@ -273,7 +280,7 @@ No mainnet send test should be run without explicit user confirmation.
 
 ## Deferred
 
-- Solscan or other indexed discovery providers beyond RPC top-20.
+- Additional indexed discovery providers beyond Solscan.
 - Versioned transactions and address lookup tables for larger batches.
 - Priority fee and compute budget tuning.
 - Per-target-token quota strategies.
