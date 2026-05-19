@@ -13,11 +13,11 @@ pub fn discover_holders(
     config: &ValidatedConfig,
     source_wallet: &Pubkey,
 ) -> Result<DiscoveryReport, DiscoveryError> {
-    let distribution_token = validate_original_spl_mint(rpc, &config.distribution_token_address)?;
+    let distribution_token = validate_token_2022_mint(rpc, &config.distribution_token_address)?;
     let target_tokens = config
         .target_token_addresses
         .iter()
-        .map(|token_address| validate_original_spl_mint(rpc, token_address))
+        .map(|token_address| validate_token_2022_mint(rpc, token_address))
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut recipients = BTreeMap::<Pubkey, DiscoveredRecipient>::new();
@@ -27,14 +27,14 @@ pub fn discover_holders(
         let largest = rpc.get_token_largest_accounts(&target_token.token_address)?;
         for (index, balance) in largest.into_iter().enumerate() {
             let rank = index + 1;
-            match verify_candidate_token_account(rpc, &target_token.token_address, balance, rank)? {
+            match verify_candidate_token_account(rpc, target_token, balance, rank)? {
                 CandidateVerification::Verified(candidate) => {
                     if let Some(reason) = exclusion_reason(
                         rpc,
                         &candidate.owner_wallet,
                         source_wallet,
                         &config.manual_exclude_wallets,
-                        &config.distribution_token_address,
+                        &distribution_token,
                     )? {
                         skipped.push(SkippedCandidate::from_candidate(candidate, reason));
                         continue;
@@ -172,7 +172,7 @@ fn compare_decimal_strings(left: &str, right: &str) -> Ordering {
     left.len().cmp(&right.len()).then_with(|| left.cmp(right))
 }
 
-pub fn validate_original_spl_mint(
+pub fn validate_token_2022_mint(
     rpc: &impl RpcReader,
     token_address: &Pubkey,
 ) -> Result<TokenMetadata, DiscoveryError> {
@@ -188,14 +188,13 @@ pub fn validate_original_spl_mint(
         });
     }
 
-    let token_2022_program = token_2022_program_id();
-    if account.owner_program == token_2022_program {
-        return Err(DiscoveryError::UnsupportedToken2022 {
+    let token_program = token_2022_program_id();
+    if account.owner_program == token_program_id() {
+        return Err(DiscoveryError::UnsupportedLegacyTokenProgram {
             token_address: *token_address,
         });
     }
 
-    let token_program = token_program_id();
     if account.owner_program != token_program {
         return Err(DiscoveryError::UnsupportedTokenProgram {
             token_address: *token_address,
@@ -218,14 +217,14 @@ pub fn validate_original_spl_mint(
 
 fn verify_candidate_token_account(
     rpc: &impl RpcReader,
-    expected_target_token: &Pubkey,
+    expected_target_token: &TokenMetadata,
     balance: TokenAccountBalance,
     rank: usize,
 ) -> Result<CandidateVerification, DiscoveryError> {
     if parse_raw_amount(&balance.amount).unwrap_or(0) == 0 {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
-                expected_target_token,
+                &expected_target_token.token_address,
                 &balance,
                 rank,
                 SkipReason::ZeroBalance,
@@ -236,7 +235,7 @@ fn verify_candidate_token_account(
     let Some(account) = rpc.get_account(&balance.token_account)? else {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
-                expected_target_token,
+                &expected_target_token.token_address,
                 &balance,
                 rank,
                 SkipReason::MissingTokenAccount,
@@ -247,7 +246,7 @@ fn verify_candidate_token_account(
     if account.executable {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
-                expected_target_token,
+                &expected_target_token.token_address,
                 &balance,
                 rank,
                 SkipReason::ExecutableTokenAccount,
@@ -255,10 +254,10 @@ fn verify_candidate_token_account(
         ));
     }
 
-    if account.owner_program != token_program_id() {
+    if account.owner_program != expected_target_token.token_program {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
-                expected_target_token,
+                &expected_target_token.token_address,
                 &balance,
                 rank,
                 SkipReason::UnsupportedTokenProgram,
@@ -275,7 +274,7 @@ fn verify_candidate_token_account(
     else {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
-                expected_target_token,
+                &expected_target_token.token_address,
                 &balance,
                 rank,
                 SkipReason::MalformedTokenAccount,
@@ -283,10 +282,10 @@ fn verify_candidate_token_account(
         ));
     };
 
-    if mint != *expected_target_token {
+    if mint != expected_target_token.token_address {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
-                expected_target_token,
+                &expected_target_token.token_address,
                 &balance,
                 rank,
                 SkipReason::TokenMintMismatch,
@@ -297,7 +296,7 @@ fn verify_candidate_token_account(
     if parse_raw_amount(&amount).unwrap_or(0) == 0 {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
-                expected_target_token,
+                &expected_target_token.token_address,
                 &balance,
                 rank,
                 SkipReason::ZeroBalance,
@@ -309,7 +308,7 @@ fn verify_candidate_token_account(
         owner_wallet: owner,
         rank,
         holding: TargetHolding {
-            target_token_address: *expected_target_token,
+            target_token_address: expected_target_token.token_address,
             token_account: balance.token_account,
             raw_amount: amount,
             decimals,
@@ -323,7 +322,7 @@ fn exclusion_reason(
     owner_wallet: &Pubkey,
     source_wallet: &Pubkey,
     manual_exclude_wallets: &[Pubkey],
-    distribution_token: &Pubkey,
+    distribution_token: &TokenMetadata,
 ) -> Result<Option<SkipReason>, DiscoveryError> {
     if owner_wallet == source_wallet {
         return Ok(Some(SkipReason::SourceWallet));
@@ -357,9 +356,14 @@ fn exclusion_reason(
 fn owner_has_positive_distribution_balance(
     rpc: &impl RpcReader,
     owner_wallet: &Pubkey,
-    distribution_token: &Pubkey,
+    distribution_token: &TokenMetadata,
 ) -> Result<bool, DiscoveryError> {
-    for token_account in rpc.get_token_accounts_by_owner(owner_wallet, distribution_token)? {
+    for token_account in
+        rpc.get_token_accounts_by_owner(owner_wallet, &distribution_token.token_address)?
+    {
+        if token_account.account.owner_program != distribution_token.token_program {
+            continue;
+        }
         let Some(ParsedAccount::TokenAccount { amount, .. }) = token_account.account.parsed else {
             continue;
         };
@@ -477,8 +481,10 @@ pub enum DiscoveryError {
     MissingTokenAccount { token_address: Pubkey },
     #[error("configured token account `{token_address}` is executable")]
     TokenAccountIsExecutable { token_address: Pubkey },
-    #[error("configured token `{token_address}` uses Token-2022, which is not supported in v0")]
-    UnsupportedToken2022 { token_address: Pubkey },
+    #[error(
+        "configured token `{token_address}` uses the legacy SPL Token Program; this tool supports Token-2022 only"
+    )]
+    UnsupportedLegacyTokenProgram { token_address: Pubkey },
     #[error("configured token `{token_address}` is owned by unsupported program `{owner_program}`")]
     UnsupportedTokenProgram {
         token_address: Pubkey,
@@ -559,29 +565,32 @@ mod tests {
     }
 
     #[test]
-    fn validates_original_spl_mint() {
+    fn validates_token_2022_mint() {
         let mint = pubkey();
         let mut rpc = MockRpc::default();
         rpc.accounts.insert(mint, mint_account(6));
 
-        let metadata = validate_original_spl_mint(&rpc, &mint).unwrap();
+        let metadata = validate_token_2022_mint(&rpc, &mint).unwrap();
 
         assert_eq!(metadata.token_address, mint);
-        assert_eq!(metadata.token_program, token_program_id());
+        assert_eq!(metadata.token_program, token_2022_program_id());
         assert_eq!(metadata.decimals, 6);
     }
 
     #[test]
-    fn rejects_token_2022_mints() {
+    fn rejects_legacy_spl_mints() {
         let mint = pubkey();
         let mut account = mint_account(6);
-        account.owner_program = token_2022_program_id();
+        account.owner_program = token_program_id();
         let mut rpc = MockRpc::default();
         rpc.accounts.insert(mint, account);
 
-        let err = validate_original_spl_mint(&rpc, &mint).unwrap_err();
+        let err = validate_token_2022_mint(&rpc, &mint).unwrap_err();
 
-        assert!(matches!(err, DiscoveryError::UnsupportedToken2022 { .. }));
+        assert!(matches!(
+            err,
+            DiscoveryError::UnsupportedLegacyTokenProgram { .. }
+        ));
     }
 
     #[test]
@@ -931,7 +940,7 @@ mod tests {
 
     fn mint_account(decimals: u8) -> RpcAccount {
         RpcAccount {
-            owner_program: token_program_id(),
+            owner_program: token_2022_program_id(),
             executable: false,
             parsed: Some(ParsedAccount::Mint {
                 decimals,
@@ -942,7 +951,7 @@ mod tests {
 
     fn token_account(mint: Pubkey, owner: Pubkey, amount: &str, decimals: u8) -> RpcAccount {
         RpcAccount {
-            owner_program: token_program_id(),
+            owner_program: token_2022_program_id(),
             executable: false,
             parsed: Some(ParsedAccount::TokenAccount {
                 mint,

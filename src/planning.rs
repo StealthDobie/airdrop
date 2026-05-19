@@ -3,7 +3,7 @@ use {
         config::ValidatedConfig,
         discovery::{
             DiscoveredRecipient, DiscoveryReport, SkippedCandidate, TargetHolding,
-            system_program_id, token_program_id,
+            system_program_id,
         },
         rpc::{ParsedAccount, RpcError, RpcReader, parse_raw_amount},
     },
@@ -68,6 +68,7 @@ pub fn create_distribution_plan(
         rpc,
         &source_ata,
         &report.distribution_token.token_address,
+        &report.distribution_token.token_program,
         source_wallet,
         report.distribution_token.decimals,
         TokenAccountRole::Source,
@@ -106,6 +107,7 @@ pub fn create_distribution_plan(
         source_wallet,
         &source_ata,
         &report.distribution_token.token_address,
+        &report.distribution_token.token_program,
     )?;
     let rent_per_ata_lamports =
         rpc.get_minimum_balance_for_rent_exemption(TOKEN_ACCOUNT_DATA_LEN)?;
@@ -160,6 +162,7 @@ fn plan_recipient(
         rpc,
         &recipient_ata,
         distribution_token,
+        token_program,
         &recipient.wallet,
         decimals,
         TokenAccountRole::Recipient,
@@ -206,6 +209,7 @@ fn pack_recipients(
     source_wallet: &Pubkey,
     source_ata: &Pubkey,
     distribution_token: &Pubkey,
+    token_program: &Pubkey,
 ) -> Result<Vec<PlannedBatch>, PlanError> {
     let mut batches = Vec::new();
     let mut current = Vec::<usize>::new();
@@ -219,6 +223,7 @@ fn pack_recipients(
             source_wallet,
             source_ata,
             distribution_token,
+            token_program,
         );
 
         if candidate_metrics.within_limits() {
@@ -240,6 +245,7 @@ fn pack_recipients(
             source_wallet,
             source_ata,
             distribution_token,
+            token_program,
         );
         batches.push(batch);
         current = vec![index];
@@ -250,6 +256,7 @@ fn pack_recipients(
             source_wallet,
             source_ata,
             distribution_token,
+            token_program,
         );
         if !single_metrics.within_limits() {
             return Err(PlanError::RecipientDoesNotFit {
@@ -267,6 +274,7 @@ fn pack_recipients(
             source_wallet,
             source_ata,
             distribution_token,
+            token_program,
         );
         batches.push(batch);
     }
@@ -281,6 +289,7 @@ fn build_batch(
     source_wallet: &Pubkey,
     source_ata: &Pubkey,
     distribution_token: &Pubkey,
+    token_program: &Pubkey,
 ) -> PlannedBatch {
     let metrics = estimate_legacy_transaction(
         recipients,
@@ -288,6 +297,7 @@ fn build_batch(
         source_wallet,
         source_ata,
         distribution_token,
+        token_program,
     );
     let recipients = recipient_indexes
         .iter()
@@ -321,12 +331,13 @@ fn estimate_legacy_transaction(
     source_wallet: &Pubkey,
     source_ata: &Pubkey,
     distribution_token: &Pubkey,
+    token_program: &Pubkey,
 ) -> TransactionMetrics {
     let mut accounts = BTreeSet::from([
         *source_wallet,
         *source_ata,
         *distribution_token,
-        token_program_id(),
+        *token_program,
     ]);
     let mut ata_creations = 0_usize;
 
@@ -385,11 +396,12 @@ fn read_required_token_account(
     rpc: &impl RpcReader,
     address: &Pubkey,
     mint: &Pubkey,
+    token_program: &Pubkey,
     owner: &Pubkey,
     decimals: u8,
     role: TokenAccountRole,
 ) -> Result<TokenAccountState, PlanError> {
-    read_optional_token_account(rpc, address, mint, owner, decimals, role)?.ok_or(
+    read_optional_token_account(rpc, address, mint, token_program, owner, decimals, role)?.ok_or(
         PlanError::MissingTokenAccount {
             address: *address,
             role,
@@ -401,6 +413,7 @@ fn read_optional_token_account(
     rpc: &impl RpcReader,
     address: &Pubkey,
     mint: &Pubkey,
+    token_program: &Pubkey,
     owner: &Pubkey,
     decimals: u8,
     role: TokenAccountRole,
@@ -417,11 +430,11 @@ fn read_optional_token_account(
         });
     }
 
-    if account.owner_program != token_program_id() {
+    if account.owner_program != *token_program {
         return Err(PlanError::InvalidTokenAccount {
             address: *address,
             role,
-            reason: "account is not owned by the SPL Token Program",
+            reason: "account is not owned by the expected Token-2022 Program",
         });
     }
 
@@ -1011,7 +1024,7 @@ mod tests {
         super::*,
         crate::{
             config::{ValidatedConfig, ValidatedSolscanConfig},
-            discovery::{SkipReason, TokenMetadata, token_2022_program_id},
+            discovery::{SkipReason, TokenMetadata, token_2022_program_id, token_program_id},
             rpc::{RpcAccount, RpcTokenAccount, TokenAccountBalance},
         },
         solana_keypair::{Keypair, Signer},
@@ -1212,7 +1225,7 @@ mod tests {
             let source_ata = derive_associated_token_account(
                 &source_wallet,
                 &distribution_token,
-                &token_program_id(),
+                &token_2022_program_id(),
             );
             let mut rpc = MockRpc {
                 rent_lamports: 2_039_280,
@@ -1229,7 +1242,7 @@ mod tests {
                 let recipient_ata = derive_associated_token_account(
                     &recipient,
                     &distribution_token,
-                    &token_program_id(),
+                    &token_2022_program_id(),
                 );
                 if matches!(existing_ata, ExistingAta::All) {
                     rpc.accounts.insert(
@@ -1253,7 +1266,7 @@ mod tests {
             let source_ata = derive_associated_token_account(
                 &self.source_wallet,
                 &self.distribution_token,
-                &token_program_id(),
+                &token_2022_program_id(),
             );
             self.rpc.accounts.insert(
                 source_ata,
@@ -1281,13 +1294,13 @@ mod tests {
             DiscoveryReport {
                 distribution_token: TokenMetadata {
                     token_address: self.distribution_token,
-                    token_program: token_program_id(),
+                    token_program: token_2022_program_id(),
                     decimals,
                     supply: "1000000000000".to_owned(),
                 },
                 target_tokens: vec![TokenMetadata {
                     token_address: self.target_token,
-                    token_program: token_program_id(),
+                    token_program: token_2022_program_id(),
                     decimals: 0,
                     supply: "1000000".to_owned(),
                 }],
@@ -1320,7 +1333,7 @@ mod tests {
 
     fn token_account(mint: Pubkey, owner: Pubkey, amount: &str, decimals: u8) -> RpcAccount {
         RpcAccount {
-            owner_program: token_program_id(),
+            owner_program: token_2022_program_id(),
             executable: false,
             parsed: Some(ParsedAccount::TokenAccount {
                 mint,

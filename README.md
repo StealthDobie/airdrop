@@ -1,6 +1,6 @@
 # airdrop
 
-Interactive Rust CLI for planning and executing targeted Solana token distributions.
+Interactive Rust CLI for planning and executing targeted Solana Token-2022 distributions.
 
 Current status: implementation in progress.
 
@@ -27,7 +27,7 @@ cargo run -- validate
 cargo run -- run
 ```
 
-`run` is still dry-run only. It reads mainnet-beta state, discovers recipients, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, and writes artifacts under `runs/<run-id>/`. It does not sign or send transactions.
+`run` is still dry-run only. It reads mainnet-beta state, requires configured distribution and target tokens to be Token-2022 mints, discovers recipients, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, and writes artifacts under `runs/<run-id>/`. It does not sign or send transactions.
 
 ## Development
 
