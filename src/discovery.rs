@@ -1,17 +1,57 @@
 use {
     crate::{
         config::ValidatedConfig,
-        rpc::{ParsedAccount, RpcError, RpcReader, TokenAccountBalance, parse_raw_amount},
+        rpc::{
+            ParsedAccount, RpcAccount, RpcError, RpcReader, TokenAccountBalance, parse_raw_amount,
+        },
+        solscan::{SolscanClient, SolscanError},
     },
     solana_pubkey::Pubkey,
-    std::{cmp::Ordering, collections::BTreeMap, str::FromStr},
+    std::{
+        cmp::Ordering,
+        collections::{BTreeMap, BTreeSet},
+        str::FromStr,
+    },
     thiserror::Error,
 };
+
+const HOLDER_FETCH_SLACK: usize = 40;
 
 pub fn discover_holders(
     rpc: &impl RpcReader,
     config: &ValidatedConfig,
     source_wallet: &Pubkey,
+) -> Result<DiscoveryReport, DiscoveryError> {
+    discover_holders_with_provider(rpc, rpc, config, source_wallet, None)
+}
+
+pub fn discover_holders_with_solscan(
+    rpc: &impl RpcReader,
+    solscan: &SolscanClient,
+    config: &ValidatedConfig,
+    source_wallet: &Pubkey,
+) -> Result<DiscoveryReport, DiscoveryError> {
+    let existing_distribution_holders = solscan
+        .get_all_token_holders(&config.distribution_token_address)?
+        .into_iter()
+        .filter_map(|holder| holder.owner_wallet)
+        .collect::<BTreeSet<_>>();
+
+    discover_holders_with_provider(
+        rpc,
+        solscan,
+        config,
+        source_wallet,
+        Some(&existing_distribution_holders),
+    )
+}
+
+fn discover_holders_with_provider(
+    rpc: &impl RpcReader,
+    holder_provider: &impl HolderProvider,
+    config: &ValidatedConfig,
+    source_wallet: &Pubkey,
+    existing_distribution_holders: Option<&BTreeSet<Pubkey>>,
 ) -> Result<DiscoveryReport, DiscoveryError> {
     let distribution_token = validate_token_2022_mint(rpc, &config.distribution_token_address)?;
     let target_tokens = config
@@ -19,41 +59,69 @@ pub fn discover_holders(
         .iter()
         .map(|token_address| validate_target_mint(rpc, token_address))
         .collect::<Result<Vec<_>, _>>()?;
+    let holder_fetch_limit = holder_fetch_limit(config.max_recipients, target_tokens.len());
 
     let mut recipients = BTreeMap::<Pubkey, DiscoveredRecipient>::new();
     let mut skipped = Vec::new();
 
-    for target_token in &target_tokens {
-        let largest = rpc.get_token_largest_accounts(&target_token.token_address)?;
-        for (index, balance) in largest.into_iter().enumerate() {
-            let rank = index + 1;
-            match verify_candidate_token_account(rpc, target_token, balance, rank)? {
-                CandidateVerification::Verified(candidate) => {
-                    if let Some(reason) = exclusion_reason(
-                        rpc,
-                        &candidate.owner_wallet,
-                        source_wallet,
-                        &config.manual_exclude_wallets,
-                        &distribution_token,
-                    )? {
-                        skipped.push(SkippedCandidate::from_candidate(candidate, reason));
-                        continue;
-                    }
+    let holder_lists = target_tokens
+        .iter()
+        .map(|target_token| {
+            holder_provider.get_token_holders(&target_token.token_address, holder_fetch_limit)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-                    recipients
-                        .entry(candidate.owner_wallet)
-                        .and_modify(|recipient| {
-                            recipient.best_rank = recipient.best_rank.min(candidate.rank);
-                            recipient.holdings.push(candidate.holding.clone());
-                        })
-                        .or_insert_with(|| DiscoveredRecipient {
-                            wallet: candidate.owner_wallet,
-                            best_rank: candidate.rank,
-                            holdings: vec![candidate.holding],
-                        });
-                }
+    for index in 0..config.max_recipients {
+        let mut saw_candidate_at_rank = false;
+        let mut verified_at_rank = Vec::new();
+
+        for (target_token, holder_list) in target_tokens.iter().zip(&holder_lists) {
+            let Some(balance) = holder_list.get(index) else {
+                continue;
+            };
+            saw_candidate_at_rank = true;
+            let rank = index + 1;
+            match verify_candidate_token_account(rpc, target_token, balance.clone(), rank)? {
+                CandidateVerification::Verified(candidate) => verified_at_rank.push(candidate),
                 CandidateVerification::Skipped(skip) => skipped.push(skip),
             }
+        }
+
+        let owner_wallets = verified_at_rank
+            .iter()
+            .map(|candidate| candidate.owner_wallet)
+            .collect::<Vec<_>>();
+        let owner_accounts = rpc.get_multiple_accounts(&owner_wallets)?;
+
+        for (candidate, owner_account) in verified_at_rank.into_iter().zip(owner_accounts) {
+            if let Some(reason) = exclusion_reason(
+                rpc,
+                &candidate.owner_wallet,
+                owner_account.as_ref(),
+                source_wallet,
+                &config.manual_exclude_wallets,
+                &distribution_token,
+                existing_distribution_holders,
+            )? {
+                skipped.push(SkippedCandidate::from_candidate(candidate, reason));
+                continue;
+            }
+
+            recipients
+                .entry(candidate.owner_wallet)
+                .and_modify(|recipient| {
+                    recipient.best_rank = recipient.best_rank.min(candidate.rank);
+                    recipient.holdings.push(candidate.holding.clone());
+                })
+                .or_insert_with(|| DiscoveredRecipient {
+                    wallet: candidate.owner_wallet,
+                    best_rank: candidate.rank,
+                    holdings: vec![candidate.holding],
+                });
+        }
+
+        if !saw_candidate_at_rank || recipients.len() >= config.max_recipients {
+            break;
         }
     }
 
@@ -84,6 +152,47 @@ pub fn discover_holders(
         recipients,
         skipped,
     })
+}
+
+fn holder_fetch_limit(max_recipients: usize, target_count: usize) -> usize {
+    if target_count <= 1 {
+        return max_recipients;
+    }
+
+    max_recipients.min(
+        max_recipients
+            .div_ceil(target_count)
+            .saturating_add(HOLDER_FETCH_SLACK),
+    )
+}
+
+trait HolderProvider {
+    fn get_token_holders(
+        &self,
+        token_address: &Pubkey,
+        limit: usize,
+    ) -> Result<Vec<TokenAccountBalance>, DiscoveryError>;
+}
+
+impl<T: RpcReader> HolderProvider for T {
+    fn get_token_holders(
+        &self,
+        token_address: &Pubkey,
+        _limit: usize,
+    ) -> Result<Vec<TokenAccountBalance>, DiscoveryError> {
+        self.get_token_largest_accounts(token_address)
+            .map_err(DiscoveryError::from)
+    }
+}
+
+impl HolderProvider for SolscanClient {
+    fn get_token_holders(
+        &self,
+        token_address: &Pubkey,
+        limit: usize,
+    ) -> Result<Vec<TokenAccountBalance>, DiscoveryError> {
+        SolscanClient::get_token_holders(self, token_address, limit).map_err(DiscoveryError::from)
+    }
 }
 
 fn compare_recipient_order(left: &DiscoveredRecipient, right: &DiscoveredRecipient) -> Ordering {
@@ -266,6 +375,31 @@ fn verify_candidate_token_account(
         ));
     }
 
+    if let Some(owner_wallet) = balance.owner_wallet {
+        if balance.decimals != expected_target_token.decimals {
+            return Ok(CandidateVerification::Skipped(
+                SkippedCandidate::from_balance(
+                    &expected_target_token.token_address,
+                    &balance,
+                    rank,
+                    SkipReason::MalformedTokenAccount,
+                ),
+            ));
+        }
+
+        return Ok(CandidateVerification::Verified(VerifiedCandidate {
+            owner_wallet,
+            rank,
+            holding: TargetHolding {
+                target_token_address: expected_target_token.token_address,
+                token_account: balance.token_account,
+                raw_amount: balance.amount,
+                decimals: balance.decimals,
+                rank,
+            },
+        }));
+    }
+
     let Some(account) = rpc.get_account(&balance.token_account)? else {
         return Ok(CandidateVerification::Skipped(
             SkippedCandidate::from_balance(
@@ -354,9 +488,11 @@ fn verify_candidate_token_account(
 fn exclusion_reason(
     rpc: &impl RpcReader,
     owner_wallet: &Pubkey,
+    owner_account: Option<&RpcAccount>,
     source_wallet: &Pubkey,
     manual_exclude_wallets: &[Pubkey],
     distribution_token: &TokenMetadata,
+    existing_distribution_holders: Option<&BTreeSet<Pubkey>>,
 ) -> Result<Option<SkipReason>, DiscoveryError> {
     if owner_wallet == source_wallet {
         return Ok(Some(SkipReason::SourceWallet));
@@ -370,7 +506,7 @@ fn exclusion_reason(
         return Ok(Some(SkipReason::OffCurveOwner));
     }
 
-    if let Some(owner_account) = rpc.get_account(owner_wallet)? {
+    if let Some(owner_account) = owner_account {
         if owner_account.executable {
             return Ok(Some(SkipReason::ExecutableOwner));
         }
@@ -380,7 +516,11 @@ fn exclusion_reason(
         }
     }
 
-    if owner_has_positive_distribution_balance(rpc, owner_wallet, distribution_token)? {
+    if let Some(existing_distribution_holders) = existing_distribution_holders {
+        if existing_distribution_holders.contains(owner_wallet) {
+            return Ok(Some(SkipReason::ExistingDistributionHolder));
+        }
+    } else if owner_has_positive_distribution_balance(rpc, owner_wallet, distribution_token)? {
         return Ok(Some(SkipReason::ExistingDistributionHolder));
     }
 
@@ -511,6 +651,8 @@ pub enum SkipReason {
 pub enum DiscoveryError {
     #[error(transparent)]
     Rpc(#[from] RpcError),
+    #[error(transparent)]
+    Solscan(#[from] SolscanError),
     #[error("configured token account `{token_address}` does not exist")]
     MissingTokenAccount { token_address: Pubkey },
     #[error("configured token account `{token_address}` is executable")]
@@ -557,6 +699,28 @@ mod tests {
         largest: HashMap<Pubkey, Vec<TokenAccountBalance>>,
         owned_token_accounts: HashMap<(Pubkey, Pubkey), Vec<RpcTokenAccount>>,
         account_lookup_failures: HashSet<Pubkey>,
+    }
+
+    #[derive(Default)]
+    struct MockHolderProvider {
+        holders: HashMap<Pubkey, Vec<TokenAccountBalance>>,
+    }
+
+    impl HolderProvider for MockHolderProvider {
+        fn get_token_holders(
+            &self,
+            token_address: &Pubkey,
+            limit: usize,
+        ) -> Result<Vec<TokenAccountBalance>, DiscoveryError> {
+            Ok(self
+                .holders
+                .get(token_address)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(limit)
+                .collect())
+        }
     }
 
     impl RpcReader for MockRpc {
@@ -682,6 +846,141 @@ mod tests {
         assert_eq!(report.target_tokens[0].token_program, token_program_id());
         assert_eq!(report.recipients.len(), 1);
         assert_eq!(report.recipients[0].wallet, owner);
+    }
+
+    #[test]
+    fn discovers_holders_from_external_provider() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let owner = keypair_pubkey();
+        let token_account_address = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(owner, system_account());
+        rpc.accounts.insert(
+            token_account_address,
+            token_account(target, owner, "100", 6),
+        );
+
+        let mut provider = MockHolderProvider::default();
+        provider
+            .holders
+            .insert(target, vec![balance(token_account_address, "100", 6)]);
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 100,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: true,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let report =
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet, None).unwrap();
+
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, owner);
+    }
+
+    #[test]
+    fn discovers_provider_supplied_owner_without_token_account_lookup() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let owner = keypair_pubkey();
+        let token_account_address = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(owner, system_account());
+
+        let mut provider = MockHolderProvider::default();
+        provider.holders.insert(
+            target,
+            vec![balance_with_owner(token_account_address, owner, "100", 6)],
+        );
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 100,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: true,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let report =
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet, None).unwrap();
+
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, owner);
+    }
+
+    #[test]
+    fn uses_prefetched_distribution_holders_for_existing_holder_exclusion() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let owner = keypair_pubkey();
+        let token_account_address = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(owner, system_account());
+
+        let mut provider = MockHolderProvider::default();
+        provider.holders.insert(
+            target,
+            vec![balance_with_owner(token_account_address, owner, "100", 6)],
+        );
+        let existing_distribution_holders = BTreeSet::from([owner]);
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 100,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: true,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let report = discover_holders_with_provider(
+            &rpc,
+            &provider,
+            &config,
+            &source_wallet,
+            Some(&existing_distribution_holders),
+        )
+        .unwrap();
+
+        assert!(report.recipients.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].owner_wallet, Some(owner));
+        assert_eq!(
+            report.skipped[0].reason,
+            SkipReason::ExistingDistributionHolder
+        );
     }
 
     #[test]
@@ -823,7 +1122,8 @@ mod tests {
     #[test]
     fn applies_global_recipient_limit() {
         let distribution = pubkey();
-        let target = pubkey();
+        let target_one = pubkey();
+        let target_two = pubkey();
         let source_wallet = keypair_pubkey();
         let owner_one = keypair_pubkey();
         let owner_two = keypair_pubkey();
@@ -832,20 +1132,67 @@ mod tests {
 
         let mut rpc = MockRpc::default();
         rpc.accounts.insert(distribution, mint_account(6));
-        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(target_one, mint_account(6));
+        rpc.accounts.insert(target_two, mint_account(6));
         rpc.accounts.insert(owner_one, system_account());
         rpc.accounts.insert(owner_two, system_account());
         rpc.accounts.insert(
             token_account_one,
-            token_account(target, owner_one, "100", 6),
+            token_account(target_one, owner_one, "100", 6),
         );
+        rpc.accounts.insert(
+            token_account_two,
+            token_account(target_two, owner_two, "90", 6),
+        );
+        rpc.largest
+            .insert(target_one, vec![balance(token_account_one, "100", 6)]);
+        rpc.largest
+            .insert(target_two, vec![balance(token_account_two, "90", 6)]);
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target_one, target_two],
+            max_recipients: 1,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: false,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let report = discover_holders(&rpc, &config, &source_wallet).unwrap();
+
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, owner_one);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].owner_wallet, Some(owner_two));
+        assert_eq!(report.skipped[0].reason, SkipReason::RecipientLimit);
+    }
+
+    #[test]
+    fn stops_verifying_after_global_limit_rank_wave() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let owner = keypair_pubkey();
+        let token_account_good = pubkey();
+        let token_account_unneeded = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(owner, system_account());
         rpc.accounts
-            .insert(token_account_two, token_account(target, owner_two, "90", 6));
+            .insert(token_account_good, token_account(target, owner, "100", 6));
+        rpc.account_lookup_failures.insert(token_account_unneeded);
         rpc.largest.insert(
             target,
             vec![
-                balance(token_account_one, "100", 6),
-                balance(token_account_two, "90", 6),
+                balance(token_account_good, "100", 6),
+                balance(token_account_unneeded, "90", 6),
             ],
         );
 
@@ -866,10 +1213,7 @@ mod tests {
         let report = discover_holders(&rpc, &config, &source_wallet).unwrap();
 
         assert_eq!(report.recipients.len(), 1);
-        assert_eq!(report.recipients[0].wallet, owner_one);
-        assert_eq!(report.skipped.len(), 1);
-        assert_eq!(report.skipped[0].owner_wallet, Some(owner_two));
-        assert_eq!(report.skipped[0].reason, SkipReason::RecipientLimit);
+        assert!(report.skipped.is_empty());
     }
 
     #[test]
@@ -1029,6 +1373,13 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn calculates_holder_fetch_limit_from_global_cap() {
+        assert_eq!(holder_fetch_limit(1000, 1), 1000);
+        assert_eq!(holder_fetch_limit(1000, 10), 140);
+        assert_eq!(holder_fetch_limit(25, 10), 25);
+    }
+
     fn mint_account(decimals: u8) -> RpcAccount {
         RpcAccount {
             owner_program: token_2022_program_id(),
@@ -1082,6 +1433,22 @@ mod tests {
     fn balance(token_account: Pubkey, amount: &str, decimals: u8) -> TokenAccountBalance {
         TokenAccountBalance {
             token_account,
+            owner_wallet: None,
+            amount: amount.to_owned(),
+            decimals,
+            ui_amount_string: amount.to_owned(),
+        }
+    }
+
+    fn balance_with_owner(
+        token_account: Pubkey,
+        owner_wallet: Pubkey,
+        amount: &str,
+        decimals: u8,
+    ) -> TokenAccountBalance {
+        TokenAccountBalance {
+            token_account,
+            owner_wallet: Some(owner_wallet),
             amount: amount.to_owned(),
             decimals,
             ui_amount_string: amount.to_owned(),

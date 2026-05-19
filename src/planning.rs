@@ -5,7 +5,7 @@ use {
             DiscoveredRecipient, DiscoveryReport, SkippedCandidate, TargetHolding,
             system_program_id,
         },
-        rpc::{ParsedAccount, RpcError, RpcReader, parse_raw_amount},
+        rpc::{ParsedAccount, RpcAccount, RpcError, RpcReader, parse_raw_amount},
     },
     serde::Serialize,
     solana_pubkey::Pubkey,
@@ -83,9 +83,30 @@ pub fn create_distribution_plan(
         });
     }
 
+    let recipient_inputs = report
+        .recipients
+        .into_iter()
+        .map(|recipient| {
+            let recipient_ata = derive_associated_token_account(
+                &recipient.wallet,
+                &report.distribution_token.token_address,
+                &report.distribution_token.token_program,
+            );
+            (recipient, recipient_ata)
+        })
+        .collect::<Vec<_>>();
+    let recipient_atas = recipient_inputs
+        .iter()
+        .map(|(_, recipient_ata)| *recipient_ata)
+        .collect::<Vec<_>>();
+    let recipient_ata_accounts = rpc.get_multiple_accounts(&recipient_atas)?;
+
     let mut seen_recipients = BTreeSet::new();
     let mut planned_recipients = Vec::with_capacity(recipient_count);
-    for recipient in report.recipients {
+    for ((recipient, recipient_ata), recipient_ata_account) in recipient_inputs
+        .into_iter()
+        .zip(recipient_ata_accounts.into_iter())
+    {
         if !seen_recipients.insert(recipient.wallet) {
             return Err(PlanError::DuplicateRecipient {
                 wallet: recipient.wallet,
@@ -93,8 +114,9 @@ pub fn create_distribution_plan(
         }
 
         planned_recipients.push(plan_recipient(
-            rpc,
             recipient,
+            recipient_ata,
+            recipient_ata_account,
             &report.distribution_token.token_address,
             &report.distribution_token.token_program,
             report.distribution_token.decimals,
@@ -149,17 +171,16 @@ pub fn create_distribution_plan(
 }
 
 fn plan_recipient(
-    rpc: &impl RpcReader,
     recipient: DiscoveredRecipient,
+    recipient_ata: Pubkey,
+    recipient_ata_account: Option<RpcAccount>,
     distribution_token: &Pubkey,
     token_program: &Pubkey,
     decimals: u8,
     amount_per_recipient_raw: u64,
 ) -> Result<PlannedRecipient, PlanError> {
-    let recipient_ata =
-        derive_associated_token_account(&recipient.wallet, distribution_token, token_program);
-    let existing_ata = read_optional_token_account(
-        rpc,
+    let existing_ata = parse_optional_token_account(
+        recipient_ata_account,
         &recipient_ata,
         distribution_token,
         token_program,
@@ -418,7 +439,27 @@ fn read_optional_token_account(
     decimals: u8,
     role: TokenAccountRole,
 ) -> Result<Option<TokenAccountState>, PlanError> {
-    let Some(account) = rpc.get_account(address)? else {
+    parse_optional_token_account(
+        rpc.get_account(address)?,
+        address,
+        mint,
+        token_program,
+        owner,
+        decimals,
+        role,
+    )
+}
+
+fn parse_optional_token_account(
+    account: Option<RpcAccount>,
+    address: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    owner: &Pubkey,
+    decimals: u8,
+    role: TokenAccountRole,
+) -> Result<Option<TokenAccountState>, PlanError> {
+    let Some(account) = account else {
         return Ok(None);
     };
 

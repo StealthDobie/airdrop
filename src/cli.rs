@@ -1,10 +1,11 @@
 use {
     crate::{
-        discovery::discover_holders,
+        discovery::{discover_holders, discover_holders_with_solscan},
         env::OsEnv,
         planning::{create_distribution_plan, write_plan_artifacts},
         rpc::HttpRpcClient,
         runtime::RuntimeConfig,
+        solscan::SolscanClient,
     },
     anyhow::Context,
     clap::{Parser, Subcommand},
@@ -41,8 +42,17 @@ pub fn run() -> anyhow::Result<()> {
         Command::Run { config } => {
             let runtime = load_runtime(config)?;
             let rpc = HttpRpcClient::new(runtime.rpc_url.clone());
-            let report =
-                discover_holders(&rpc, &runtime.config, &runtime.source_wallet.public_key())?;
+            let report = if let Some(solscan_api_key) = runtime.solscan_api_key.as_deref() {
+                let solscan = SolscanClient::new(solscan_api_key);
+                discover_holders_with_solscan(
+                    &rpc,
+                    &solscan,
+                    &runtime.config,
+                    &runtime.source_wallet.public_key(),
+                )?
+            } else {
+                discover_holders(&rpc, &runtime.config, &runtime.source_wallet.public_key())?
+            };
             let plan = create_distribution_plan(
                 &rpc,
                 &runtime.config,
@@ -98,6 +108,14 @@ fn validate(config_path: PathBuf) -> anyhow::Result<()> {
     println!("Cluster: {}", runtime.config.cluster_name);
     println!("RPC env: {}", runtime.config.rpc_url_env);
     println!("Source wallet: {}", runtime.source_wallet.public_key());
+    println!(
+        "Holder discovery: {}",
+        if runtime.solscan_api_key.is_some() {
+            "solscan"
+        } else {
+            "rpc"
+        }
+    );
     println!(
         "Distribution token: {}",
         runtime.config.distribution_token_address

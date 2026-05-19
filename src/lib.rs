@@ -5,4 +5,5 @@ pub mod env;
 pub mod planning;
 pub mod rpc;
 pub mod runtime;
+pub mod solscan;
 pub mod source_wallet;
