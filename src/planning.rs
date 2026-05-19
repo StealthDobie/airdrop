@@ -1336,6 +1336,7 @@ mod tests {
                 solscan: ValidatedSolscanConfig {
                     enabled: false,
                     api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                    holder_fetch_limit: 100,
                 },
             }
         }

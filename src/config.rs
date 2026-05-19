@@ -76,6 +76,8 @@ pub struct SolscanConfig {
     pub enabled: bool,
     #[serde(default = "default_solscan_api_key_env")]
     pub api_key_env: String,
+    #[serde(default = "default_solscan_holder_fetch_limit")]
+    pub holder_fetch_limit: usize,
 }
 
 impl Default for SolscanConfig {
@@ -83,6 +85,7 @@ impl Default for SolscanConfig {
         Self {
             enabled: false,
             api_key_env: default_solscan_api_key_env(),
+            holder_fetch_limit: default_solscan_holder_fetch_limit(),
         }
     }
 }
@@ -103,6 +106,7 @@ pub struct ValidatedConfig {
 pub struct ValidatedSolscanConfig {
     pub enabled: bool,
     pub api_key_env: String,
+    pub holder_fetch_limit: usize,
 }
 
 impl ConfigFile {
@@ -159,6 +163,11 @@ impl ConfigFile {
             "providers.solscan.api_key_env",
             self.providers.solscan.api_key_env,
         )?;
+        if self.providers.solscan.holder_fetch_limit == 0 {
+            return Err(ConfigError::NotPositive {
+                field: "providers.solscan.holder_fetch_limit",
+            });
+        }
 
         Ok(ValidatedConfig {
             cluster_name: "mainnet-beta".to_owned(),
@@ -171,6 +180,7 @@ impl ConfigFile {
             solscan: ValidatedSolscanConfig {
                 enabled: self.providers.solscan.enabled,
                 api_key_env,
+                holder_fetch_limit: self.providers.solscan.holder_fetch_limit,
             },
         })
     }
@@ -178,6 +188,10 @@ impl ConfigFile {
 
 fn default_solscan_api_key_env() -> String {
     "SOLSCAN_API_KEY".to_owned()
+}
+
+fn default_solscan_holder_fetch_limit() -> usize {
+    100
 }
 
 fn require_nonempty(field: &'static str, value: String) -> Result<String, ConfigError> {
@@ -287,6 +301,51 @@ manual_exclude_wallets = ["{TARGET_ONE}"]
         assert_eq!(config.manual_exclude_wallets.len(), 1);
         assert!(!config.solscan.enabled);
         assert_eq!(config.solscan.api_key_env, "SOLSCAN_API_KEY");
+        assert_eq!(config.solscan.holder_fetch_limit, 100);
+    }
+
+    #[test]
+    fn validates_solscan_holder_fetch_limit_override() {
+        let config = format!(
+            r#"
+{}
+
+[providers.solscan]
+enabled = true
+api_key_env = "CUSTOM_SOLSCAN_KEY"
+holder_fetch_limit = 250
+"#,
+            valid_config()
+        );
+        let config = ConfigFile::from_toml_str(&config)
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        assert!(config.solscan.enabled);
+        assert_eq!(config.solscan.api_key_env, "CUSTOM_SOLSCAN_KEY");
+        assert_eq!(config.solscan.holder_fetch_limit, 250);
+    }
+
+    #[test]
+    fn rejects_zero_solscan_holder_fetch_limit() {
+        let config = format!(
+            r#"
+{}
+
+[providers.solscan]
+holder_fetch_limit = 0
+"#,
+            valid_config()
+        );
+        let err = ConfigFile::from_toml_str(&config)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigError::NotPositive { field } if field == "providers.solscan.holder_fetch_limit")
+        );
     }
 
     #[test]

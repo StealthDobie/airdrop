@@ -85,6 +85,7 @@ manual_exclude_wallets = []
 [providers.solscan]
 enabled = false
 api_key_env = "SOLSCAN_API_KEY"
+holder_fetch_limit = 100
 ```
 
 Settings intentionally not configurable in v0:
@@ -147,7 +148,7 @@ RPC v0 discovery limit:
 Solscan discovery:
 
 - When `[providers.solscan].enabled = true`, load the API key from `SOLSCAN_API_KEY` by default.
-- Fetch holder pages from Solscan's `token/holders` endpoint to an internal rank-depth limit based on the global recipient cap and target-token count.
+- Fetch holder pages from Solscan's `token/holders` endpoint up to `providers.solscan.holder_fetch_limit` ranked holders per target token. The default is `100`.
 - Treat Solscan as a candidate source only. The CLI still reads mint metadata, owner-account exclusions, source ATA state, and recipient ATA state through Solana RPC; when Solscan provides holder owners, the CLI can avoid per-candidate token-account lookups.
 
 Default recipient selection:

@@ -17,3 +17,4 @@ manual_exclude_wallets = []
 [providers.solscan]
 enabled = false
 api_key_env = "SOLSCAN_API_KEY"
+holder_fetch_limit = 100

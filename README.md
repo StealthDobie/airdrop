@@ -37,6 +37,7 @@ Holder discovery uses RPC by default. If public RPC rate limits `getTokenLargest
 [providers.solscan]
 enabled = true
 api_key_env = "SOLSCAN_API_KEY"
+holder_fetch_limit = 100
 ```
 
 ## Development

@@ -42,10 +42,11 @@ pub fn run() -> anyhow::Result<()> {
         Command::Run { config } => {
             let runtime = load_runtime(config)?;
             eprintln!(
-                "Loaded config: cluster={}, targets={}, max_recipients={}",
+                "Loaded config: cluster={}, targets={}, max_recipients={}, solscan_holder_fetch_limit={}",
                 runtime.config.cluster_name,
                 runtime.config.target_token_addresses.len(),
-                runtime.config.max_recipients
+                runtime.config.max_recipients,
+                runtime.config.solscan.holder_fetch_limit
             );
             let rpc = HttpRpcClient::new(runtime.rpc_url.clone());
             let report = if let Some(solscan_api_key) = runtime.solscan_api_key.as_deref() {
@@ -130,6 +131,10 @@ fn validate(config_path: PathBuf) -> anyhow::Result<()> {
         } else {
             "rpc"
         }
+    );
+    println!(
+        "Solscan holder fetch limit: {}",
+        runtime.config.solscan.holder_fetch_limit
     );
     println!(
         "Distribution token: {}",

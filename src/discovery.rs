@@ -15,8 +15,6 @@ use {
     thiserror::Error,
 };
 
-const HOLDER_FETCH_SLACK: usize = 40;
-
 pub fn discover_holders(
     rpc: &impl RpcReader,
     config: &ValidatedConfig,
@@ -80,7 +78,11 @@ fn discover_holders_with_provider(
         );
         target_tokens.push(validate_target_mint(rpc, token_address)?);
     }
-    let holder_fetch_limit = holder_fetch_limit(config.max_recipients, target_tokens.len());
+    let holder_fetch_limit = if config.solscan.enabled {
+        config.solscan.holder_fetch_limit
+    } else {
+        config.max_recipients
+    };
     eprintln!(
         "Fetching up to {} ranked holder candidate(s) per target token",
         holder_fetch_limit
@@ -194,18 +196,6 @@ fn discover_holders_with_provider(
         recipients,
         skipped,
     })
-}
-
-fn holder_fetch_limit(max_recipients: usize, target_count: usize) -> usize {
-    if target_count <= 1 {
-        return max_recipients;
-    }
-
-    max_recipients.min(
-        max_recipients
-            .div_ceil(target_count)
-            .saturating_add(HOLDER_FETCH_SLACK),
-    )
 }
 
 trait HolderProvider {
@@ -880,6 +870,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -923,6 +914,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: true,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -931,6 +923,53 @@ mod tests {
 
         assert_eq!(report.recipients.len(), 1);
         assert_eq!(report.recipients[0].wallet, owner);
+    }
+
+    #[test]
+    fn uses_configured_solscan_holder_fetch_limit() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let owner_one = keypair_pubkey();
+        let owner_two = keypair_pubkey();
+        let token_account_one = pubkey();
+        let token_account_two = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(owner_one, system_account());
+        rpc.accounts.insert(owner_two, system_account());
+
+        let mut provider = MockHolderProvider::default();
+        provider.holders.insert(
+            target,
+            vec![
+                balance_with_owner(token_account_one, owner_one, "100", 6),
+                balance_with_owner(token_account_two, owner_two, "90", 6),
+            ],
+        );
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 100,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: true,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 1,
+            },
+        };
+
+        let report =
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet, None).unwrap();
+
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, owner_one);
     }
 
     #[test]
@@ -963,6 +1002,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: true,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1004,6 +1044,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: true,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1104,6 +1145,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1152,6 +1194,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1202,6 +1245,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1249,6 +1293,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1299,6 +1344,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1355,6 +1401,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1392,6 +1439,7 @@ mod tests {
             solscan: crate::config::ValidatedSolscanConfig {
                 enabled: false,
                 api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
             },
         };
 
@@ -1413,13 +1461,6 @@ mod tests {
             .iter()
             .map(|skipped| skipped.reason)
             .collect()
-    }
-
-    #[test]
-    fn calculates_holder_fetch_limit_from_global_cap() {
-        assert_eq!(holder_fetch_limit(1000, 1), 1000);
-        assert_eq!(holder_fetch_limit(1000, 10), 140);
-        assert_eq!(holder_fetch_limit(25, 10), 25);
     }
 
     fn mint_account(decimals: u8) -> RpcAccount {
