@@ -2,13 +2,16 @@ use {
     serde::{Deserialize, Serialize, de::DeserializeOwned},
     serde_json::{Value, json},
     solana_pubkey::Pubkey,
-    std::{str::FromStr, time::Duration},
+    std::{str::FromStr, thread::sleep, time::Duration},
     thiserror::Error,
 };
 
 const CONFIRMED_COMMITMENT: &str = "confirmed";
 const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const RPC_MAX_ATTEMPTS: usize = 6;
+const RPC_INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+const RPC_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
 
 pub trait RpcReader {
     fn get_account(&self, address: &Pubkey) -> Result<Option<RpcAccount>, RpcError>;
@@ -61,36 +64,70 @@ impl HttpRpcClient {
             method,
             params,
         };
-        let response: RpcEnvelope<T> = self
-            .client
-            .post(&self.endpoint)
-            .json(&request)
-            .send()
-            .map_err(|source| RpcError::Transport {
-                method,
-                message: source.to_string(),
-            })?
-            .error_for_status()
-            .map_err(|source| RpcError::Transport {
-                method,
-                message: source.to_string(),
-            })?
-            .json()
-            .map_err(|source| RpcError::Decode {
+        let mut retry_delay = RPC_INITIAL_RETRY_DELAY;
+
+        for attempt in 1..=RPC_MAX_ATTEMPTS {
+            let response = self
+                .client
+                .post(&self.endpoint)
+                .json(&request)
+                .send()
+                .map_err(|source| RpcError::Transport {
+                    method,
+                    message: source.to_string(),
+                })?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_retry_after);
+                let retryable = status.as_u16() == 429 || status.is_server_error();
+                let message = response.text().unwrap_or_default();
+
+                if retryable && attempt < RPC_MAX_ATTEMPTS {
+                    let delay = retry_after.unwrap_or(retry_delay).min(RPC_MAX_RETRY_DELAY);
+                    sleep(delay);
+                    retry_delay = (retry_delay * 2).min(RPC_MAX_RETRY_DELAY);
+                    continue;
+                }
+
+                return Err(RpcError::HttpStatus {
+                    method,
+                    status: status.as_u16(),
+                    attempts: attempt,
+                    message,
+                });
+            }
+
+            let response: RpcEnvelope<T> = response.json().map_err(|source| RpcError::Decode {
                 method,
                 message: source.to_string(),
             })?;
 
-        if let Some(error) = response.error {
-            return Err(RpcError::Remote {
-                method,
-                code: error.code,
-                message: error.message,
-            });
+            if let Some(error) = response.error {
+                return Err(RpcError::Remote {
+                    method,
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+
+            return response.result.ok_or(RpcError::MissingResult { method });
         }
 
-        response.result.ok_or(RpcError::MissingResult { method })
+        unreachable!("RPC retry loop always returns before exhausting attempts")
     }
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+        .filter(|duration| !duration.is_zero())
 }
 
 impl RpcReader for HttpRpcClient {
@@ -219,6 +256,13 @@ pub enum RpcError {
     #[error("RPC transport error calling {method}: {message}")]
     Transport {
         method: &'static str,
+        message: String,
+    },
+    #[error("RPC HTTP status {status} calling {method} after {attempts} attempt(s): {message}")]
+    HttpStatus {
+        method: &'static str,
+        status: u16,
+        attempts: usize,
         message: String,
     },
     #[error("RPC response decode error calling {method}: {message}")]
@@ -510,6 +554,14 @@ mod tests {
         assert_eq!(client.endpoint, "https://api.mainnet-beta.solana.com");
         assert_eq!(RPC_CONNECT_TIMEOUT, Duration::from_secs(10));
         assert_eq!(RPC_REQUEST_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parses_retry_after_seconds() {
+        assert_eq!(parse_retry_after("1"), Some(Duration::from_secs(1)));
+        assert_eq!(parse_retry_after("15"), Some(Duration::from_secs(15)));
+        assert_eq!(parse_retry_after("0"), None);
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), None);
     }
 
     fn token_program_id() -> Pubkey {
