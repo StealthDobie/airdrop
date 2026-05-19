@@ -99,7 +99,9 @@ fn discover_holders_with_provider(
         .collect::<Result<Vec<_>, _>>()?;
     eprintln!("Holder candidate fetch complete");
 
-    for index in 0..config.max_recipients {
+    let max_rank = holder_lists.iter().map(Vec::len).max().unwrap_or_default();
+
+    for index in 0..max_rank {
         let mut saw_candidate_at_rank = false;
         let mut verified_at_rank = Vec::new();
 
@@ -1256,6 +1258,58 @@ mod tests {
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].owner_wallet, Some(owner_two));
         assert_eq!(report.skipped[0].reason, SkipReason::RecipientLimit);
+    }
+
+    #[test]
+    fn backfills_global_limit_after_top_rank_exclusion() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let good_owner = keypair_pubkey();
+        let token_account_source = pubkey();
+        let token_account_good = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(good_owner, system_account());
+        rpc.accounts.insert(
+            token_account_source,
+            token_account(target, source_wallet, "100", 6),
+        );
+        rpc.accounts.insert(
+            token_account_good,
+            token_account(target, good_owner, "90", 6),
+        );
+        rpc.largest.insert(
+            target,
+            vec![
+                balance(token_account_source, "100", 6),
+                balance(token_account_good, "90", 6),
+            ],
+        );
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 1,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: false,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
+            },
+        };
+
+        let report = discover_holders(&rpc, &config, &source_wallet).unwrap();
+
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, good_owner);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::SourceWallet);
     }
 
     #[test]

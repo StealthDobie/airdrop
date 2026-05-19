@@ -1,6 +1,6 @@
 # Airdrop CLI Specification
 
-Status: draft v0.7
+Status: draft v0.8
 Date: 2026-05-19
 Repository: `StealthDobie/airdrop`
 
@@ -212,7 +212,7 @@ Flow:
 5. Discover, verify, merge, rank, and exclude target holders.
 6. Calculate per-recipient amount.
 7. Build recipient batches by transaction size/account/instruction limits.
-8. Simulate representative batches, including batches with ATA creation if applicable.
+8. Simulate every planned batch, including batches with ATA creation if applicable. During the no-send implementation slices, this uses unsigned transactions with `sigVerify=false`; the send slice will sign before submission.
 9. Save plan artifacts.
 10. Print confirmation summary.
 11. Require the operator to type a confirmation phrase, for example `SEND <recipient_count>`.

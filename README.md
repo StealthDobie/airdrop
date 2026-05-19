@@ -27,9 +27,17 @@ cargo run -- validate
 cargo run -- run
 ```
 
-`run` is still dry-run only. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, and writes artifacts under `runs/<run-id>/`. It does not sign or send transactions.
+`run` is still no-send. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, simulates every planned transaction, and writes artifacts under `runs/<run-id>/`. The simulation path uses unsigned transactions with RPC signature verification disabled; this slice does not submit transactions.
 
-Progress is logged to stderr during network-heavy phases such as Solscan pagination, mint validation, recipient verification, and ATA planning.
+Run artifacts include:
+
+- `plan.json`
+- `recipients.csv`
+- `skipped.csv`
+- `simulation.json`
+- `ledger.jsonl`
+
+Progress is logged to stderr during network-heavy phases such as Solscan pagination, mint validation, recipient verification, ATA planning, and transaction simulation.
 
 Holder discovery uses RPC by default. If public RPC rate limits `getTokenLargestAccounts`, enable Solscan in `config.toml` and provide `SOLSCAN_API_KEY` in `.env`:
 

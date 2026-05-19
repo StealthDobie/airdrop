@@ -22,10 +22,10 @@ use {
     thiserror::Error,
 };
 
-const LEGACY_TRANSACTION_SIZE_LIMIT: usize = 1_232;
-const ACCOUNT_LOCK_LIMIT: usize = 64;
-const EXECUTED_INSTRUCTION_LIMIT: usize = 64;
-const TOKEN_ACCOUNT_DATA_LEN: usize = 165;
+pub const LEGACY_TRANSACTION_SIZE_LIMIT: usize = 1_232;
+pub const ACCOUNT_LOCK_LIMIT: usize = 64;
+pub const EXECUTED_INSTRUCTION_LIMIT: usize = 64;
+const TOKEN_2022_ASSOCIATED_TOKEN_ACCOUNT_DATA_LEN: usize = 170;
 const ESTIMATED_SIGNATURE_FEE_LAMPORTS: u64 = 5_000;
 
 const SIGNATURE_LENGTH: usize = 64;
@@ -141,7 +141,7 @@ pub fn create_distribution_plan(
         &report.distribution_token.token_program,
     )?;
     let rent_per_ata_lamports =
-        rpc.get_minimum_balance_for_rent_exemption(TOKEN_ACCOUNT_DATA_LEN)?;
+        rpc.get_minimum_balance_for_rent_exemption(TOKEN_2022_ASSOCIATED_TOKEN_ACCOUNT_DATA_LEN)?;
     let ata_creations = planned_recipients
         .iter()
         .filter(|recipient| recipient.create_recipient_ata)
@@ -224,6 +224,7 @@ pub fn write_plan_artifacts(
         recipients_path: run_dir.join("recipients.csv"),
         skipped_path: run_dir.join("skipped.csv"),
         ledger_path: run_dir.join("ledger.jsonl"),
+        simulation_path: run_dir.join("simulation.json"),
     };
 
     write_json(&artifacts.plan_path, &PlanJson::from_plan(plan, &artifacts))?;
@@ -784,6 +785,7 @@ pub struct PlanArtifacts {
     pub recipients_path: PathBuf,
     pub skipped_path: PathBuf,
     pub ledger_path: PathBuf,
+    pub simulation_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1053,6 +1055,7 @@ struct ArtifactPathsJson {
     recipients_path: String,
     skipped_path: String,
     ledger_path: String,
+    simulation_path: String,
 }
 
 impl From<&PlanArtifacts> for ArtifactPathsJson {
@@ -1064,6 +1067,7 @@ impl From<&PlanArtifacts> for ArtifactPathsJson {
             recipients_path: artifacts.recipients_path.display().to_string(),
             skipped_path: artifacts.skipped_path.display().to_string(),
             ledger_path: artifacts.ledger_path.display().to_string(),
+            simulation_path: artifacts.simulation_path.display().to_string(),
         }
     }
 }
@@ -1112,7 +1116,7 @@ mod tests {
             _data_len: usize,
         ) -> Result<u64, RpcError> {
             Ok(if self.rent_lamports == 0 {
-                2_039_280
+                2_074_080
             } else {
                 self.rent_lamports
             })
@@ -1198,7 +1202,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(plan.ata_creations(), 2);
-        assert_eq!(plan.estimated_ata_rent_lamports, 4_078_560);
+        assert_eq!(plan.estimated_ata_rent_lamports, 4_148_160);
         assert_eq!(plan.batches[0].ata_creations, 2);
         assert!(plan.batches[0].metrics.top_level_instruction_count >= 4);
     }
@@ -1250,6 +1254,11 @@ mod tests {
                 .unwrap()
                 .contains("\"ledger_path\"")
         );
+        assert!(
+            fs::read_to_string(&artifacts.plan_path)
+                .unwrap()
+                .contains("\"simulation_path\"")
+        );
 
         fs::remove_dir_all(runs_dir).unwrap();
     }
@@ -1278,7 +1287,7 @@ mod tests {
                 &token_2022_program_id(),
             );
             let mut rpc = MockRpc {
-                rent_lamports: 2_039_280,
+                rent_lamports: 2_074_080,
                 ..MockRpc::default()
             };
             rpc.accounts.insert(
