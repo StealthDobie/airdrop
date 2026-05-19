@@ -5,6 +5,7 @@ use {
         planning::{create_distribution_plan, write_plan_artifacts},
         rpc::HttpRpcClient,
         runtime::RuntimeConfig,
+        simulation::{simulate_plan, write_simulation_artifact},
         solscan::SolscanClient,
     },
     anyhow::Context,
@@ -76,8 +77,24 @@ pub fn run() -> anyhow::Result<()> {
             )?;
             eprintln!("Writing plan artifacts");
             let artifacts = write_plan_artifacts(&plan, Path::new("runs"))?;
+            eprintln!("Simulating planned transactions");
+            let simulation_report = simulate_plan(&rpc, &plan)?;
+            let simulation_artifact_path =
+                write_simulation_artifact(&simulation_report, &artifacts)?;
+            eprintln!(
+                "Simulation complete: succeeded={}, failed={}",
+                simulation_report.succeeded_batch_count(),
+                simulation_report.failed_batch_count()
+            );
+            if simulation_report.failed_batch_count() > 0 {
+                anyhow::bail!(
+                    "simulation failed for {} planned transaction(s); see {}",
+                    simulation_report.failed_batch_count(),
+                    simulation_artifact_path.display()
+                );
+            }
 
-            println!("Plan OK (dry run; no transactions sent)");
+            println!("Plan and simulation OK (dry run; no transactions sent)");
             println!("Cluster: {}", plan.cluster_name);
             println!("Source wallet: {}", plan.source_wallet);
             println!("Source ATA: {}", plan.source_ata);
@@ -97,6 +114,10 @@ pub fn run() -> anyhow::Result<()> {
                 plan.remainder_ui, plan.remainder_raw
             );
             println!("Planned transactions: {}", plan.batches.len());
+            println!(
+                "Simulated transactions: {}",
+                simulation_report.succeeded_batch_count()
+            );
             println!("Recipient ATAs to create: {}", plan.ata_creations());
             println!(
                 "Estimated signature fees: {} lamports",
@@ -111,6 +132,7 @@ pub fn run() -> anyhow::Result<()> {
                 println!("  {reason}: {count}");
             }
             println!("Plan artifacts: {}", artifacts.run_dir.display());
+            println!("Simulation: {}", simulation_artifact_path.display());
             println!("Ledger: {}", artifacts.ledger_path.display());
             Ok(())
         }

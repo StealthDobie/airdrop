@@ -1,6 +1,7 @@
 use {
     serde::{Deserialize, Serialize, de::DeserializeOwned},
     serde_json::{Value, json},
+    solana_hash::Hash,
     solana_pubkey::Pubkey,
     std::{str::FromStr, thread::sleep, time::Duration},
     thiserror::Error,
@@ -35,6 +36,14 @@ pub trait RpcReader {
         mint: &Pubkey,
     ) -> Result<Vec<RpcTokenAccount>, RpcError>;
     fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64, RpcError>;
+}
+
+pub trait RpcSimulator {
+    fn get_latest_blockhash(&self) -> Result<Hash, RpcError>;
+    fn simulate_transaction(
+        &self,
+        encoded_transaction: &str,
+    ) -> Result<TransactionSimulation, RpcError>;
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +274,47 @@ impl RpcReader for HttpRpcClient {
     }
 }
 
+impl RpcSimulator for HttpRpcClient {
+    fn get_latest_blockhash(&self) -> Result<Hash, RpcError> {
+        let response = self.request_context_value::<JsonLatestBlockhash>(
+            "getLatestBlockhash",
+            json!([
+                {
+                    "commitment": CONFIRMED_COMMITMENT
+                }
+            ]),
+        )?;
+
+        Hash::from_str(&response.value.blockhash).map_err(|_| RpcError::InvalidBlockhash {
+            value: response.value.blockhash,
+        })
+    }
+
+    fn simulate_transaction(
+        &self,
+        encoded_transaction: &str,
+    ) -> Result<TransactionSimulation, RpcError> {
+        let response = self.request_context_value::<JsonTransactionSimulation>(
+            "simulateTransaction",
+            json!([
+                encoded_transaction,
+                {
+                    "encoding": "base64",
+                    "commitment": CONFIRMED_COMMITMENT,
+                    "sigVerify": false,
+                    "replaceRecentBlockhash": false
+                }
+            ]),
+        )?;
+
+        Ok(TransactionSimulation {
+            err: response.value.err,
+            logs: response.value.logs.unwrap_or_default(),
+            units_consumed: response.value.units_consumed,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcAccount {
     pub owner_program: Pubkey,
@@ -302,6 +352,13 @@ pub struct TokenAccountBalance {
 pub struct RpcTokenAccount {
     pub token_account: Pubkey,
     pub account: RpcAccount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TransactionSimulation {
+    pub err: Option<Value>,
+    pub logs: Vec<String>,
+    pub units_consumed: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -346,6 +403,8 @@ pub enum RpcError {
     InvalidPubkey { field: &'static str, value: String },
     #[error("RPC returned invalid token amount `{value}` in {field}")]
     InvalidAmount { field: &'static str, value: String },
+    #[error("RPC returned invalid latest blockhash `{value}`")]
+    InvalidBlockhash { value: String },
 }
 
 #[derive(Debug, Error)]
@@ -432,6 +491,19 @@ struct JsonTokenAccountBalance {
 struct JsonTokenAccountWithPubkey {
     pubkey: String,
     account: JsonAccount,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonLatestBlockhash {
+    blockhash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonTransactionSimulation {
+    err: Option<Value>,
+    logs: Option<Vec<String>>,
+    #[serde(rename = "unitsConsumed")]
+    units_consumed: Option<u64>,
 }
 
 impl TryFrom<JsonAccount> for RpcAccount {
@@ -622,6 +694,47 @@ mod tests {
         assert_eq!(parse_retry_after("15"), Some(Duration::from_secs(15)));
         assert_eq!(parse_retry_after("0"), None);
         assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn parses_transaction_simulation_result() {
+        let response: RpcValue<JsonTransactionSimulation> = serde_json::from_value(json!({
+            "context": {
+                "slot": 123
+            },
+            "value": {
+                "err": null,
+                "logs": ["Program log: ok"],
+                "unitsConsumed": 42
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(response.value.err, None);
+        assert_eq!(
+            response.value.logs,
+            Some(vec!["Program log: ok".to_owned()])
+        );
+        assert_eq!(response.value.units_consumed, Some(42));
+    }
+
+    #[test]
+    fn parses_latest_blockhash_result() {
+        let response: RpcValue<JsonLatestBlockhash> = serde_json::from_value(json!({
+            "context": {
+                "slot": 123
+            },
+            "value": {
+                "blockhash": "11111111111111111111111111111111",
+                "lastValidBlockHeight": 321
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            Hash::from_str(&response.value.blockhash).unwrap(),
+            Hash::default()
+        );
     }
 
     fn token_program_id() -> Pubkey {

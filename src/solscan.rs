@@ -61,7 +61,7 @@ impl SolscanClient {
 
         while holders.len() < limit {
             let response = self.request_token_holders_page(token_address, page)?;
-            let total = response.total.unwrap_or(0);
+            let total = response.total;
             let item_count = response.items.len();
 
             for item in response.items {
@@ -77,14 +77,12 @@ impl SolscanClient {
                 page,
                 item_count,
                 holders.len(),
-                if total == 0 {
-                    display_limit(limit)
-                } else {
-                    total.to_string()
-                }
+                total
+                    .map(|total| total.to_string())
+                    .unwrap_or_else(|| display_limit(limit))
             );
 
-            if item_count == 0 || holders.len() >= total {
+            if should_stop_pagination(item_count, holders.len(), total) {
                 break;
             }
 
@@ -317,6 +315,10 @@ fn display_limit(limit: usize) -> String {
     }
 }
 
+fn should_stop_pagination(item_count: usize, collected_count: usize, total: Option<usize>) -> bool {
+    item_count == 0 || total.is_some_and(|total| collected_count >= total)
+}
+
 #[cfg(test)]
 mod tests {
     use {super::*, serde_json::json};
@@ -378,5 +380,17 @@ mod tests {
 
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-key"));
+    }
+
+    #[test]
+    fn continues_pagination_when_total_is_missing() {
+        assert!(!should_stop_pagination(40, 40, None));
+        assert!(should_stop_pagination(0, 40, None));
+    }
+
+    #[test]
+    fn stops_pagination_at_known_total() {
+        assert!(!should_stop_pagination(40, 40, Some(100)));
+        assert!(should_stop_pagination(20, 100, Some(100)));
     }
 }

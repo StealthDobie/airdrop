@@ -22,9 +22,9 @@ use {
     thiserror::Error,
 };
 
-const LEGACY_TRANSACTION_SIZE_LIMIT: usize = 1_232;
-const ACCOUNT_LOCK_LIMIT: usize = 64;
-const EXECUTED_INSTRUCTION_LIMIT: usize = 64;
+pub const LEGACY_TRANSACTION_SIZE_LIMIT: usize = 1_232;
+pub const ACCOUNT_LOCK_LIMIT: usize = 64;
+pub const EXECUTED_INSTRUCTION_LIMIT: usize = 64;
 const TOKEN_ACCOUNT_DATA_LEN: usize = 165;
 const ESTIMATED_SIGNATURE_FEE_LAMPORTS: u64 = 5_000;
 
@@ -224,6 +224,7 @@ pub fn write_plan_artifacts(
         recipients_path: run_dir.join("recipients.csv"),
         skipped_path: run_dir.join("skipped.csv"),
         ledger_path: run_dir.join("ledger.jsonl"),
+        simulation_path: run_dir.join("simulation.json"),
     };
 
     write_json(&artifacts.plan_path, &PlanJson::from_plan(plan, &artifacts))?;
@@ -784,6 +785,7 @@ pub struct PlanArtifacts {
     pub recipients_path: PathBuf,
     pub skipped_path: PathBuf,
     pub ledger_path: PathBuf,
+    pub simulation_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1053,6 +1055,7 @@ struct ArtifactPathsJson {
     recipients_path: String,
     skipped_path: String,
     ledger_path: String,
+    simulation_path: String,
 }
 
 impl From<&PlanArtifacts> for ArtifactPathsJson {
@@ -1064,6 +1067,7 @@ impl From<&PlanArtifacts> for ArtifactPathsJson {
             recipients_path: artifacts.recipients_path.display().to_string(),
             skipped_path: artifacts.skipped_path.display().to_string(),
             ledger_path: artifacts.ledger_path.display().to_string(),
+            simulation_path: artifacts.simulation_path.display().to_string(),
         }
     }
 }
@@ -1249,6 +1253,11 @@ mod tests {
             fs::read_to_string(&artifacts.plan_path)
                 .unwrap()
                 .contains("\"ledger_path\"")
+        );
+        assert!(
+            fs::read_to_string(&artifacts.plan_path)
+                .unwrap()
+                .contains("\"simulation_path\"")
         );
 
         fs::remove_dir_all(runs_dir).unwrap();
