@@ -296,15 +296,7 @@ impl RpcSimulator for HttpRpcClient {
     ) -> Result<TransactionSimulation, RpcError> {
         let response = self.request_context_value::<JsonTransactionSimulation>(
             "simulateTransaction",
-            json!([
-                encoded_transaction,
-                {
-                    "encoding": "base64",
-                    "commitment": CONFIRMED_COMMITMENT,
-                    "sigVerify": false,
-                    "replaceRecentBlockhash": false
-                }
-            ]),
+            json!([encoded_transaction, simulation_request_config()]),
         )?;
 
         Ok(TransactionSimulation {
@@ -313,6 +305,15 @@ impl RpcSimulator for HttpRpcClient {
             units_consumed: response.value.units_consumed,
         })
     }
+}
+
+fn simulation_request_config() -> Value {
+    json!({
+        "encoding": "base64",
+        "commitment": CONFIRMED_COMMITMENT,
+        "sigVerify": false,
+        "replaceRecentBlockhash": true
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -716,6 +717,16 @@ mod tests {
             Some(vec!["Program log: ok".to_owned()])
         );
         assert_eq!(response.value.units_consumed, Some(42));
+    }
+
+    #[test]
+    fn simulation_request_replaces_recent_blockhash() {
+        let config = simulation_request_config();
+
+        assert_eq!(config["encoding"], "base64");
+        assert_eq!(config["commitment"], "confirmed");
+        assert_eq!(config["sigVerify"], false);
+        assert_eq!(config["replaceRecentBlockhash"], true);
     }
 
     #[test]
