@@ -209,6 +209,12 @@ Send command:
 airdrop send --config config.toml
 ```
 
+Resume command:
+
+```bash
+airdrop send --config config.toml --resume runs/<run-id>
+```
+
 Flow:
 
 1. Load `.env` and `config.toml`.
@@ -226,6 +232,14 @@ Flow:
 13. Persist every transaction and recipient result immediately.
 14. Print final summary with signatures and failures.
 
+Resume flow:
+
+- Load the saved `plan.json` and `ledger.jsonl` from the run directory.
+- Verify the saved plan cluster, source wallet, and distribution token match the current config and source key.
+- Reconcile prepared or submitted batch signatures through RPC before sending anything new.
+- Skip confirmed batches and preserve the original per-recipient amount for remaining batches.
+- Refuse to rebroadcast a prepared or submitted signature that has not reached a terminal status.
+
 ## Transaction Execution
 
 For each packed batch:
@@ -236,11 +250,13 @@ For each packed batch:
 4. Ensure the serialized transaction is below 1,232 bytes.
 5. Ensure account and instruction limits are respected.
 6. Simulate with `confirmed` commitment.
-7. Submit signed transaction with `confirmed` preflight.
-8. Confirm with `confirmed` commitment.
-9. Record signature, slot, per-recipient status, amount, recipient, and ATA creation flag.
+7. Write a durable prepared-batch ledger entry containing the locally signed transaction signature.
+8. Submit signed transaction with `confirmed` preflight.
+9. Reject RPC responses whose returned signature differs from the locally signed transaction signature.
+10. Confirm with `confirmed` commitment. Treat explicit `confirmed`/`finalized` success, or a successful status object with nullable confirmation status, as terminal success.
+11. Record signature, slot, per-recipient status, amount, recipient, and ATA creation flag.
 
-Transactions are atomic. If one recipient instruction in a batch fails, the whole transaction fails. Resume logic should split failed batches into smaller batches or single-recipient retries before marking recipients failed.
+Transactions are atomic. If one recipient instruction in a batch fails, the whole transaction fails. V0 resume may retry terminally failed batches with the original packing after the operator fixes the underlying issue. Smaller retry batches and single-recipient fallback can be added later.
 
 ## Resume and Audit
 

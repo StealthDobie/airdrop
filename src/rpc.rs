@@ -429,6 +429,7 @@ pub struct TransactionSimulation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureStatus {
     pub slot: u64,
+    pub status: Option<Value>,
     pub confirmation_status: Option<String>,
     pub err: Option<Value>,
 }
@@ -582,6 +583,7 @@ struct JsonTransactionSimulation {
 struct JsonSignatureStatus {
     slot: u64,
     err: Option<Value>,
+    status: Option<Value>,
     #[serde(rename = "confirmationStatus")]
     confirmation_status: Option<String>,
 }
@@ -590,6 +592,7 @@ impl From<JsonSignatureStatus> for SignatureStatus {
     fn from(value: JsonSignatureStatus) -> Self {
         Self {
             slot: value.slot,
+            status: value.status,
             confirmation_status: value.confirmation_status,
             err: value.err,
         }

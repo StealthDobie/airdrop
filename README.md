@@ -35,7 +35,15 @@ To submit the airdrop, run:
 cargo run -- send
 ```
 
-`send` repeats the full plan and simulation first. It refuses to submit if the source wallet SOL balance is below the estimated signature fees plus recipient ATA rent deposits. If funding is sufficient, it prints the final mainnet-beta summary and requires the exact confirmation phrase before signing and submitting transactions. Submitted and confirmed batches are appended to `runs/<run-id>/ledger.jsonl`.
+`send` repeats the full plan and simulation first. It refuses to submit if the source wallet SOL balance is below the estimated signature fees plus recipient ATA rent deposits. If funding is sufficient, it prints the final mainnet-beta summary and requires the exact confirmation phrase before signing and submitting transactions. Prepared, submitted, confirmed, and failed batches are appended to `runs/<run-id>/ledger.jsonl`.
+
+If a send is interrupted or stops after some batches land, resume the saved plan instead of starting over:
+
+```bash
+cargo run -- send --resume runs/<run-id>
+```
+
+Resume mode loads the original `plan.json`, reconciles any prepared or submitted batch signatures from `ledger.jsonl`, skips confirmed batches, and refuses to rebroadcast an in-flight signature that has not reached a terminal status yet.
 
 Run artifacts include:
 

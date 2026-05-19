@@ -6,7 +6,7 @@ use {
             check_source_sol_funding, confirmation_matches, confirmation_phrase,
             required_sol_lamports, send_plan,
         },
-        planning::{create_distribution_plan, write_plan_artifacts},
+        planning::{create_distribution_plan, read_plan_artifacts, write_plan_artifacts},
         rpc::HttpRpcClient,
         runtime::RuntimeConfig,
         simulation::{SimulationReport, simulate_plan, write_simulation_artifact},
@@ -43,6 +43,9 @@ enum Command {
     Send {
         #[arg(short, long, default_value = "config.toml")]
         config: PathBuf,
+        /// Resume a previously planned run directory without rebuilding the recipient list.
+        #[arg(long)]
+        resume: Option<PathBuf>,
     },
 }
 
@@ -53,7 +56,7 @@ pub fn run() -> anyhow::Result<()> {
     match cli.command {
         Command::Validate { config } => validate(config),
         Command::Run { config } => run_dry(config),
-        Command::Send { config } => send(config),
+        Command::Send { config, resume } => send(config, resume),
     }
 }
 
@@ -67,15 +70,17 @@ fn run_dry(config: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn send(config: PathBuf) -> anyhow::Result<()> {
-    let prepared = prepare_run(config)?;
-    ensure_simulation_success(&prepared)?;
-    print_plan_summary(
-        &prepared,
-        "Plan and simulation OK (ready to send; no transactions sent yet)",
-    );
+fn send(config: PathBuf, resume: Option<PathBuf>) -> anyhow::Result<()> {
+    let prepared = if let Some(run_dir) = resume {
+        prepare_resume(config, run_dir)?
+    } else {
+        let prepared = prepare_run(config)?;
+        ensure_simulation_success(&prepared)?;
+        prepared
+    };
+    print_plan_summary(&prepared, send_summary_heading(&prepared));
 
-    let funding = check_source_sol_funding(&prepared.rpc, &prepared.plan)?;
+    let funding = check_source_sol_funding(&prepared.rpc, &prepared.plan, &prepared.artifacts)?;
     println!(
         "Source SOL balance: {} lamports ({} SOL)",
         funding.available_lamports,
@@ -183,21 +188,73 @@ fn prepare_run(config: PathBuf) -> anyhow::Result<PreparedRun> {
         rpc,
         plan,
         artifacts,
-        simulation_report,
+        simulation_report: Some(simulation_report),
+        simulation_artifact_path,
+    })
+}
+
+fn prepare_resume(config: PathBuf, run_dir: PathBuf) -> anyhow::Result<PreparedRun> {
+    let runtime = load_runtime(config)?;
+    let (plan, artifacts) = read_plan_artifacts(&run_dir)
+        .with_context(|| format!("failed to resume run {}", run_dir.display()))?;
+
+    if plan.cluster_name != runtime.config.cluster_name {
+        anyhow::bail!(
+            "resume run cluster `{}` does not match config cluster `{}`",
+            plan.cluster_name,
+            runtime.config.cluster_name
+        );
+    }
+    if plan.source_wallet != runtime.source_wallet.public_key() {
+        anyhow::bail!(
+            "resume run source wallet `{}` does not match configured source wallet `{}`",
+            plan.source_wallet,
+            runtime.source_wallet.public_key()
+        );
+    }
+    if plan.distribution_token_address != runtime.config.distribution_token_address {
+        anyhow::bail!(
+            "resume run distribution token `{}` does not match config distribution token `{}`",
+            plan.distribution_token_address,
+            runtime.config.distribution_token_address
+        );
+    }
+
+    eprintln!("Resuming saved run {}", artifacts.run_dir.display());
+    let rpc_url = runtime.rpc_url.clone();
+    let simulation_artifact_path = artifacts.simulation_path.clone();
+    Ok(PreparedRun {
+        runtime,
+        rpc: HttpRpcClient::new(rpc_url),
+        plan,
+        artifacts,
+        simulation_report: None,
         simulation_artifact_path,
     })
 }
 
 fn ensure_simulation_success(prepared: &PreparedRun) -> anyhow::Result<()> {
-    if prepared.simulation_report.failed_batch_count() > 0 {
+    let Some(simulation_report) = &prepared.simulation_report else {
+        return Ok(());
+    };
+
+    if simulation_report.failed_batch_count() > 0 {
         anyhow::bail!(
             "simulation failed for {} planned transaction(s); see {}",
-            prepared.simulation_report.failed_batch_count(),
+            simulation_report.failed_batch_count(),
             prepared.simulation_artifact_path.display()
         );
     }
 
     Ok(())
+}
+
+fn send_summary_heading(prepared: &PreparedRun) -> &'static str {
+    if prepared.simulation_report.is_some() {
+        "Plan and simulation OK (ready to send; no transactions sent yet)"
+    } else {
+        "Loaded saved run (ready to resume; no transactions sent yet)"
+    }
 }
 
 fn print_plan_summary(prepared: &PreparedRun, heading: &str) {
@@ -222,10 +279,14 @@ fn print_plan_summary(prepared: &PreparedRun, heading: &str) {
         plan.remainder_ui, plan.remainder_raw
     );
     println!("Planned transactions: {}", plan.batches.len());
-    println!(
-        "Simulated transactions: {}",
-        prepared.simulation_report.succeeded_batch_count()
-    );
+    if let Some(simulation_report) = &prepared.simulation_report {
+        println!(
+            "Simulated transactions: {}",
+            simulation_report.succeeded_batch_count()
+        );
+    } else {
+        println!("Simulated transactions: loaded from saved run");
+    }
     println!("Recipient ATAs to create: {}", plan.ata_creations());
     println!(
         "Estimated signature fees: {} lamports ({} SOL)",
@@ -302,7 +363,7 @@ struct PreparedRun {
     rpc: HttpRpcClient,
     plan: crate::planning::DistributionPlan,
     artifacts: crate::planning::PlanArtifacts,
-    simulation_report: SimulationReport,
+    simulation_report: Option<SimulationReport>,
     simulation_artifact_path: PathBuf,
 }
 

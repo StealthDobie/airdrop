@@ -2,12 +2,12 @@ use {
     crate::{
         config::ValidatedConfig,
         discovery::{
-            DiscoveredRecipient, DiscoveryReport, SkippedCandidate, TargetHolding,
+            DiscoveredRecipient, DiscoveryReport, SkipReason, SkippedCandidate, TargetHolding,
             system_program_id,
         },
         rpc::{ParsedAccount, RpcAccount, RpcError, RpcReader, parse_raw_amount},
     },
-    serde::Serialize,
+    serde::{Deserialize, Serialize},
     solana_pubkey::Pubkey,
     std::{
         cmp::Ordering,
@@ -233,6 +233,36 @@ pub fn write_plan_artifacts(
     write_text(&artifacts.ledger_path, "")?;
 
     Ok(artifacts)
+}
+
+pub fn read_plan_artifacts(
+    run_dir: impl AsRef<Path>,
+) -> Result<(DistributionPlan, PlanArtifacts), PlanError> {
+    let run_dir = run_dir.as_ref().to_path_buf();
+    let run_id = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| PlanError::InvalidRunDirectory {
+            path: run_dir.display().to_string(),
+        })?
+        .to_owned();
+    let artifacts = PlanArtifacts {
+        run_id,
+        run_dir: run_dir.clone(),
+        plan_path: run_dir.join("plan.json"),
+        recipients_path: run_dir.join("recipients.csv"),
+        skipped_path: run_dir.join("skipped.csv"),
+        ledger_path: run_dir.join("ledger.jsonl"),
+        simulation_path: run_dir.join("simulation.json"),
+    };
+    let contents = fs::read_to_string(&artifacts.plan_path).map_err(|source| PlanError::Read {
+        path: artifacts.plan_path.display().to_string(),
+        source,
+    })?;
+    let plan_json: PlanJson = serde_json::from_str(&contents)?;
+    let plan = plan_json.into_plan(&artifacts.plan_path)?;
+
+    Ok((plan, artifacts))
 }
 
 fn pack_recipients(
@@ -761,7 +791,7 @@ pub struct PlannedBatchRecipient {
     pub create_recipient_ata: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 pub struct TransactionMetrics {
     pub serialized_size: usize,
     pub account_locks: usize,
@@ -858,9 +888,25 @@ pub enum PlanError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to read plan artifact `{path}`: {source}")]
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid run directory `{path}`")]
+    InvalidRunDirectory { path: String },
+    #[error("plan artifact `{path}` has invalid `{field}` public key `{value}`")]
+    InvalidPlanPubkey {
+        path: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error("plan artifact `{path}` has invalid skip reason `{value}`")]
+    InvalidPlanSkipReason { path: String, value: String },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct PlanJson {
     summary: PlanSummaryJson,
     recipients: Vec<RecipientJson>,
@@ -879,9 +925,63 @@ impl PlanJson {
             artifact_paths: ArtifactPathsJson::from(artifacts),
         }
     }
+
+    fn into_plan(self, path: &Path) -> Result<DistributionPlan, PlanError> {
+        let summary = self.summary;
+        let recipients = self
+            .recipients
+            .into_iter()
+            .map(|recipient| recipient.into_planned_recipient(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let skipped = self
+            .skipped
+            .into_iter()
+            .map(|skipped| skipped.into_skipped_candidate(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let batches = self
+            .batches
+            .into_iter()
+            .map(|batch| batch.into_planned_batch(path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(DistributionPlan {
+            cluster_name: summary.cluster_name,
+            source_wallet: parse_plan_pubkey(
+                path,
+                "summary.source_wallet",
+                &summary.source_wallet,
+            )?,
+            source_ata: parse_plan_pubkey(path, "summary.source_ata", &summary.source_ata)?,
+            source_balance_raw: summary.source_balance_raw,
+            source_balance_ui: summary.source_balance_ui,
+            distribution_token_address: parse_plan_pubkey(
+                path,
+                "summary.distribution_token_address",
+                &summary.distribution_token_address,
+            )?,
+            distribution_token_program: parse_plan_pubkey(
+                path,
+                "summary.distribution_token_program",
+                &summary.distribution_token_program,
+            )?,
+            distribution_decimals: summary.distribution_decimals,
+            total_amount_raw: summary.total_amount_raw,
+            total_amount_ui: summary.total_amount_ui,
+            amount_per_recipient_raw: summary.amount_per_recipient_raw,
+            amount_per_recipient_ui: summary.amount_per_recipient_ui,
+            remainder_raw: summary.remainder_raw,
+            remainder_ui: summary.remainder_ui,
+            recipients,
+            skipped,
+            batches,
+            rent_per_ata_lamports: summary.rent_per_ata_lamports,
+            estimated_ata_rent_lamports: summary.estimated_ata_rent_lamports,
+            estimated_signature_fee_lamports: summary.estimated_signature_fee_lamports,
+        })
+    }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct PlanSummaryJson {
     cluster_name: String,
     source_wallet: String,
@@ -936,7 +1036,7 @@ impl PlanSummaryJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RecipientJson {
     wallet: String,
     recipient_ata: String,
@@ -961,7 +1061,29 @@ impl From<&PlannedRecipient> for RecipientJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+impl RecipientJson {
+    fn into_planned_recipient(self, path: &Path) -> Result<PlannedRecipient, PlanError> {
+        Ok(PlannedRecipient {
+            wallet: parse_plan_pubkey(path, "recipients.wallet", &self.wallet)?,
+            recipient_ata: parse_plan_pubkey(
+                path,
+                "recipients.recipient_ata",
+                &self.recipient_ata,
+            )?,
+            amount_raw: self.amount_raw,
+            amount_ui: self.amount_ui,
+            create_recipient_ata: self.create_recipient_ata,
+            best_rank: self.best_rank,
+            holdings: self
+                .holdings
+                .into_iter()
+                .map(|holding| holding.into_target_holding(path))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct HoldingJson {
     target_token_address: String,
     token_account: String,
@@ -982,7 +1104,23 @@ impl From<&TargetHolding> for HoldingJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+impl HoldingJson {
+    fn into_target_holding(self, path: &Path) -> Result<TargetHolding, PlanError> {
+        Ok(TargetHolding {
+            target_token_address: parse_plan_pubkey(
+                path,
+                "holdings.target_token_address",
+                &self.target_token_address,
+            )?,
+            token_account: parse_plan_pubkey(path, "holdings.token_account", &self.token_account)?,
+            raw_amount: self.raw_amount,
+            decimals: self.decimals,
+            rank: self.rank,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct SkippedJson {
     target_token_address: String,
     token_account: String,
@@ -1003,7 +1141,27 @@ impl From<&SkippedCandidate> for SkippedJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+impl SkippedJson {
+    fn into_skipped_candidate(self, path: &Path) -> Result<SkippedCandidate, PlanError> {
+        Ok(SkippedCandidate {
+            target_token_address: parse_plan_pubkey(
+                path,
+                "skipped.target_token_address",
+                &self.target_token_address,
+            )?,
+            token_account: parse_plan_pubkey(path, "skipped.token_account", &self.token_account)?,
+            owner_wallet: self
+                .owner_wallet
+                .as_deref()
+                .map(|wallet| parse_plan_pubkey(path, "skipped.owner_wallet", wallet))
+                .transpose()?,
+            rank: self.rank,
+            reason: parse_skip_reason(path, &self.reason)?,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct BatchJson {
     index: usize,
     recipient_count: usize,
@@ -1028,7 +1186,24 @@ impl From<&PlannedBatch> for BatchJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+impl BatchJson {
+    fn into_planned_batch(self, path: &Path) -> Result<PlannedBatch, PlanError> {
+        let recipients = self
+            .recipients
+            .into_iter()
+            .map(|recipient| recipient.into_planned_batch_recipient(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PlannedBatch {
+            index: self.index,
+            recipient_count: self.recipient_count,
+            ata_creations: self.ata_creations,
+            metrics: self.metrics,
+            recipients,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct BatchRecipientJson {
     recipient_index: usize,
     wallet: String,
@@ -1047,7 +1222,22 @@ impl From<&PlannedBatchRecipient> for BatchRecipientJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+impl BatchRecipientJson {
+    fn into_planned_batch_recipient(self, path: &Path) -> Result<PlannedBatchRecipient, PlanError> {
+        Ok(PlannedBatchRecipient {
+            recipient_index: self.recipient_index,
+            wallet: parse_plan_pubkey(path, "batches.recipients.wallet", &self.wallet)?,
+            recipient_ata: parse_plan_pubkey(
+                path,
+                "batches.recipients.recipient_ata",
+                &self.recipient_ata,
+            )?,
+            create_recipient_ata: self.create_recipient_ata,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct ArtifactPathsJson {
     run_id: String,
     run_dir: String,
@@ -1056,6 +1246,40 @@ struct ArtifactPathsJson {
     skipped_path: String,
     ledger_path: String,
     simulation_path: String,
+}
+
+fn parse_plan_pubkey(path: &Path, field: &'static str, value: &str) -> Result<Pubkey, PlanError> {
+    Pubkey::from_str(value).map_err(|_| PlanError::InvalidPlanPubkey {
+        path: path.display().to_string(),
+        field,
+        value: value.to_owned(),
+    })
+}
+
+fn parse_skip_reason(path: &Path, value: &str) -> Result<SkipReason, PlanError> {
+    let reason = match value {
+        "MissingTokenAccount" => SkipReason::MissingTokenAccount,
+        "MalformedTokenAccount" => SkipReason::MalformedTokenAccount,
+        "ZeroBalance" => SkipReason::ZeroBalance,
+        "TokenMintMismatch" => SkipReason::TokenMintMismatch,
+        "UnsupportedTokenProgram" => SkipReason::UnsupportedTokenProgram,
+        "ExecutableTokenAccount" => SkipReason::ExecutableTokenAccount,
+        "SourceWallet" => SkipReason::SourceWallet,
+        "ManualExclude" => SkipReason::ManualExclude,
+        "OffCurveOwner" => SkipReason::OffCurveOwner,
+        "ExecutableOwner" => SkipReason::ExecutableOwner,
+        "ProgramOwnedOwner" => SkipReason::ProgramOwnedOwner,
+        "ExistingDistributionHolder" => SkipReason::ExistingDistributionHolder,
+        "RecipientLimit" => SkipReason::RecipientLimit,
+        _ => {
+            return Err(PlanError::InvalidPlanSkipReason {
+                path: path.display().to_string(),
+                value: value.to_owned(),
+            });
+        }
+    };
+
+    Ok(reason)
 }
 
 impl From<&PlanArtifacts> for ArtifactPathsJson {
@@ -1259,6 +1483,15 @@ mod tests {
                 .unwrap()
                 .contains("\"simulation_path\"")
         );
+        let (loaded_plan, loaded_artifacts) = read_plan_artifacts(&artifacts.run_dir).unwrap();
+        assert_eq!(loaded_plan.source_wallet, plan.source_wallet);
+        assert_eq!(
+            loaded_plan.distribution_token_address,
+            plan.distribution_token_address
+        );
+        assert_eq!(loaded_plan.recipients, plan.recipients);
+        assert_eq!(loaded_plan.batches, plan.batches);
+        assert_eq!(loaded_artifacts.ledger_path, artifacts.ledger_path);
 
         fs::remove_dir_all(runs_dir).unwrap();
     }
