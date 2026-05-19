@@ -125,9 +125,14 @@ pub fn run() -> anyhow::Result<()> {
                 format_lamports_as_sol(plan.estimated_signature_fee_lamports)
             );
             println!(
-                "Estimated ATA rent exposure: {} lamports ({} SOL)",
+                "Estimated ATA rent deposits: {} lamports ({} SOL)",
                 plan.estimated_ata_rent_lamports,
                 format_lamports_as_sol(plan.estimated_ata_rent_lamports)
+            );
+            println!(
+                "Rent per recipient ATA: {} lamports ({} SOL)",
+                plan.rent_per_ata_lamports,
+                format_lamports_as_sol(plan.rent_per_ata_lamports)
             );
             println!("Skipped candidates: {}", plan.skipped.len());
             for (reason, count) in plan.skipped_counts_by_reason() {
