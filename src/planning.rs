@@ -103,9 +103,8 @@ pub fn create_distribution_plan(
 
     let mut seen_recipients = BTreeSet::new();
     let mut planned_recipients = Vec::with_capacity(recipient_count);
-    for ((recipient, recipient_ata), recipient_ata_account) in recipient_inputs
-        .into_iter()
-        .zip(recipient_ata_accounts.into_iter())
+    for ((recipient, recipient_ata), recipient_ata_account) in
+        recipient_inputs.into_iter().zip(recipient_ata_accounts)
     {
         if !seen_recipients.insert(recipient.wallet) {
             return Err(PlanError::DuplicateRecipient {
