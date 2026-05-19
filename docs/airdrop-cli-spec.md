@@ -1,6 +1,6 @@
 # Airdrop CLI Specification
 
-Status: draft v0.8
+Status: draft v0.9
 Date: 2026-05-19
 Repository: `StealthDobie/airdrop`
 
@@ -197,10 +197,16 @@ Suggested artifacts:
 
 ## Interactive Flow
 
-Draft command:
+Dry-run command:
 
 ```bash
 airdrop run --config config.toml
+```
+
+Send command:
+
+```bash
+airdrop send --config config.toml
 ```
 
 Flow:
@@ -212,7 +218,7 @@ Flow:
 5. Discover, verify, merge, rank, and exclude target holders.
 6. Calculate per-recipient amount.
 7. Build recipient batches by transaction size/account/instruction limits.
-8. Simulate every planned batch, including batches with ATA creation if applicable. During the no-send implementation slices, this uses unsigned transactions with `sigVerify=false`; the send slice will sign before submission.
+8. Simulate every planned batch, including batches with ATA creation if applicable. The dry-run command uses unsigned transactions with `sigVerify=false`; the send command signs fresh transactions before submission and uses RPC preflight.
 9. Save plan artifacts.
 10. Print confirmation summary.
 11. Require the operator to type a confirmation phrase, for example `SEND <recipient_count>`.

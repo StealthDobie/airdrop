@@ -11,6 +11,7 @@ use {
     serde::Serialize,
     solana_hash::Hash,
     solana_instruction::{AccountMeta, Instruction},
+    solana_keypair::Keypair,
     solana_transaction::Transaction,
     std::{
         fs::File,
@@ -65,6 +66,48 @@ pub fn write_simulation_artifact(
     Ok(artifacts.simulation_path.clone())
 }
 
+pub(crate) fn build_signed_batch_transaction(
+    plan: &DistributionPlan,
+    batch: &PlannedBatch,
+    recent_blockhash: &Hash,
+    source_keypair: &Keypair,
+) -> Result<BuiltBatchTransaction, SimulationError> {
+    let instructions = build_batch_instructions(plan, batch)?;
+    let mut transaction = Transaction::new_with_payer(&instructions, Some(&plan.source_wallet));
+    transaction
+        .try_sign(&[source_keypair], recent_blockhash.clone())
+        .map_err(|source| SimulationError::Sign {
+            batch_index: batch.index,
+            message: source.to_string(),
+        })?;
+    let signature = transaction
+        .signatures
+        .first()
+        .map(ToString::to_string)
+        .ok_or(SimulationError::MissingSignature {
+            batch_index: batch.index,
+        })?;
+    let serialized_transaction =
+        bincode::serialize(&transaction).map_err(|source| SimulationError::Serialize {
+            batch_index: batch.index,
+            source,
+        })?;
+    let metrics = transaction_metrics(&transaction, serialized_transaction.len(), batch);
+
+    if !metrics.within_limits() {
+        return Err(SimulationError::TransactionLimitExceeded {
+            batch_index: batch.index,
+            metrics,
+        });
+    }
+
+    Ok(BuiltBatchTransaction {
+        encoded_transaction: BASE64_STANDARD.encode(serialized_transaction),
+        signature: Some(signature),
+        metrics,
+    })
+}
+
 fn build_unsigned_batch_transaction(
     plan: &DistributionPlan,
     batch: &PlannedBatch,
@@ -89,6 +132,7 @@ fn build_unsigned_batch_transaction(
 
     Ok(BuiltBatchTransaction {
         encoded_transaction: BASE64_STANDARD.encode(serialized_transaction),
+        signature: None,
         metrics,
     })
 }
@@ -219,9 +263,10 @@ pub struct BatchSimulation {
 }
 
 #[derive(Debug)]
-struct BuiltBatchTransaction {
-    encoded_transaction: String,
-    metrics: TransactionMetrics,
+pub(crate) struct BuiltBatchTransaction {
+    pub encoded_transaction: String,
+    pub signature: Option<String>,
+    pub metrics: TransactionMetrics,
 }
 
 #[derive(Debug, Error)]
@@ -236,6 +281,10 @@ pub enum SimulationError {
         #[source]
         source: bincode::Error,
     },
+    #[error("failed to sign planned batch {batch_index} transaction: {message}")]
+    Sign { batch_index: usize, message: String },
+    #[error("signed planned batch {batch_index} transaction has no signature")]
+    MissingSignature { batch_index: usize },
     #[error(
         "planned batch {batch_index} transaction exceeds legacy transaction limits: {metrics:?}"
     )]
@@ -321,6 +370,23 @@ mod tests {
     }
 
     #[test]
+    fn builds_signed_transaction_with_signature() {
+        let source_keypair = Keypair::new();
+        let fixture = SimulationFixture::new_with_source(1, false, source_keypair.pubkey());
+        let built = build_signed_batch_transaction(
+            &fixture.plan,
+            &fixture.plan.batches[0],
+            &Hash::default(),
+            &source_keypair,
+        )
+        .expect("valid signed transaction");
+
+        assert!(built.metrics.within_limits());
+        assert!(built.signature.is_some());
+        assert!(!built.encoded_transaction.is_empty());
+    }
+
+    #[test]
     fn rejects_oversized_legacy_transaction() {
         let fixture = SimulationFixture::new(40, true);
         let err = build_unsigned_batch_transaction(
@@ -342,7 +408,14 @@ mod tests {
 
     impl SimulationFixture {
         fn new(recipient_count: usize, create_atas: bool) -> Self {
-            let source_wallet = Keypair::new().pubkey();
+            Self::new_with_source(recipient_count, create_atas, Keypair::new().pubkey())
+        }
+
+        fn new_with_source(
+            recipient_count: usize,
+            create_atas: bool,
+            source_wallet: solana_pubkey::Pubkey,
+        ) -> Self {
             let distribution_token = Keypair::new().pubkey();
             let distribution_token_program = token_2022_program_id();
             let source_ata = derive_associated_token_account(

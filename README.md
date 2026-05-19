@@ -27,7 +27,15 @@ cargo run -- validate
 cargo run -- run
 ```
 
-`run` is still no-send. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, simulates every planned transaction, and writes artifacts under `runs/<run-id>/`. The simulation path uses unsigned transactions with RPC signature verification disabled; this slice does not submit transactions.
+`run` is no-send. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, simulates every planned transaction, and writes artifacts under `runs/<run-id>/`. The simulation path uses unsigned transactions with RPC signature verification disabled.
+
+To submit the airdrop, run:
+
+```bash
+cargo run -- send
+```
+
+`send` repeats the full plan and simulation first. It refuses to submit if the source wallet SOL balance is below the estimated signature fees plus recipient ATA rent deposits. If funding is sufficient, it prints the final mainnet-beta summary and requires the exact confirmation phrase before signing and submitting transactions. Submitted and confirmed batches are appended to `runs/<run-id>/ledger.jsonl`.
 
 Run artifacts include:
 
