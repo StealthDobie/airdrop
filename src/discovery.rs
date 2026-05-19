@@ -17,7 +17,7 @@ pub fn discover_holders(
     let target_tokens = config
         .target_token_addresses
         .iter()
-        .map(|token_address| validate_token_2022_mint(rpc, token_address))
+        .map(|token_address| validate_target_mint(rpc, token_address))
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut recipients = BTreeMap::<Pubkey, DiscoveredRecipient>::new();
@@ -176,6 +176,21 @@ pub fn validate_token_2022_mint(
     rpc: &impl RpcReader,
     token_address: &Pubkey,
 ) -> Result<TokenMetadata, DiscoveryError> {
+    validate_mint(rpc, token_address, MintProgramPolicy::Token2022Only)
+}
+
+pub fn validate_target_mint(
+    rpc: &impl RpcReader,
+    token_address: &Pubkey,
+) -> Result<TokenMetadata, DiscoveryError> {
+    validate_mint(rpc, token_address, MintProgramPolicy::LegacyOrToken2022)
+}
+
+fn validate_mint(
+    rpc: &impl RpcReader,
+    token_address: &Pubkey,
+    policy: MintProgramPolicy,
+) -> Result<TokenMetadata, DiscoveryError> {
     let account = rpc
         .get_account(token_address)?
         .ok_or(DiscoveryError::MissingTokenAccount {
@@ -188,19 +203,7 @@ pub fn validate_token_2022_mint(
         });
     }
 
-    let token_program = token_2022_program_id();
-    if account.owner_program == token_program_id() {
-        return Err(DiscoveryError::UnsupportedLegacyTokenProgram {
-            token_address: *token_address,
-        });
-    }
-
-    if account.owner_program != token_program {
-        return Err(DiscoveryError::UnsupportedTokenProgram {
-            token_address: *token_address,
-            owner_program: account.owner_program,
-        });
-    }
+    let token_program = policy.validate_owner(*token_address, account.owner_program)?;
 
     match account.parsed {
         Some(ParsedAccount::Mint { decimals, supply }) => Ok(TokenMetadata {
@@ -212,6 +215,37 @@ pub fn validate_token_2022_mint(
         _ => Err(DiscoveryError::TokenAccountIsNotMint {
             token_address: *token_address,
         }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MintProgramPolicy {
+    Token2022Only,
+    LegacyOrToken2022,
+}
+
+impl MintProgramPolicy {
+    fn validate_owner(
+        self,
+        token_address: Pubkey,
+        owner_program: Pubkey,
+    ) -> Result<Pubkey, DiscoveryError> {
+        match self {
+            Self::Token2022Only if owner_program == token_2022_program_id() => Ok(owner_program),
+            Self::Token2022Only if owner_program == token_program_id() => {
+                Err(DiscoveryError::UnsupportedLegacyDistributionToken { token_address })
+            }
+            Self::LegacyOrToken2022
+                if owner_program == token_2022_program_id()
+                    || owner_program == token_program_id() =>
+            {
+                Ok(owner_program)
+            }
+            _ => Err(DiscoveryError::UnsupportedTokenProgram {
+                token_address,
+                owner_program,
+            }),
+        }
     }
 }
 
@@ -482,9 +516,9 @@ pub enum DiscoveryError {
     #[error("configured token account `{token_address}` is executable")]
     TokenAccountIsExecutable { token_address: Pubkey },
     #[error(
-        "configured token `{token_address}` uses the legacy SPL Token Program; this tool supports Token-2022 only"
+        "distribution token `{token_address}` uses the legacy SPL Token Program; distribution sends require Token-2022"
     )]
-    UnsupportedLegacyTokenProgram { token_address: Pubkey },
+    UnsupportedLegacyDistributionToken { token_address: Pubkey },
     #[error("configured token `{token_address}` is owned by unsupported program `{owner_program}`")]
     UnsupportedTokenProgram {
         token_address: Pubkey,
@@ -578,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_legacy_spl_mints() {
+    fn rejects_legacy_spl_distribution_mints() {
         let mint = pubkey();
         let mut account = mint_account(6);
         account.owner_program = token_program_id();
@@ -589,8 +623,65 @@ mod tests {
 
         assert!(matches!(
             err,
-            DiscoveryError::UnsupportedLegacyTokenProgram { .. }
+            DiscoveryError::UnsupportedLegacyDistributionToken { .. }
         ));
+    }
+
+    #[test]
+    fn validates_legacy_target_mints_for_read_only_discovery() {
+        let mint = pubkey();
+        let mut account = mint_account(6);
+        account.owner_program = token_program_id();
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(mint, account);
+
+        let metadata = validate_target_mint(&rpc, &mint).unwrap();
+
+        assert_eq!(metadata.token_address, mint);
+        assert_eq!(metadata.token_program, token_program_id());
+        assert_eq!(metadata.decimals, 6);
+    }
+
+    #[test]
+    fn discovers_legacy_target_holders_for_token_2022_distribution() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let owner = keypair_pubkey();
+        let token_account_address = pubkey();
+        let mut target_mint = mint_account(6);
+        target_mint.owner_program = token_program_id();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, target_mint);
+        rpc.accounts.insert(owner, system_account());
+        rpc.accounts.insert(
+            token_account_address,
+            token_account_with_program(target, owner, "100", 6, token_program_id()),
+        );
+        rpc.largest
+            .insert(target, vec![balance(token_account_address, "100", 6)]);
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 100,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: false,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+            },
+        };
+
+        let report = discover_holders(&rpc, &config, &source_wallet).unwrap();
+
+        assert_eq!(report.target_tokens[0].token_program, token_program_id());
+        assert_eq!(report.recipients.len(), 1);
+        assert_eq!(report.recipients[0].wallet, owner);
     }
 
     #[test]
@@ -950,8 +1041,18 @@ mod tests {
     }
 
     fn token_account(mint: Pubkey, owner: Pubkey, amount: &str, decimals: u8) -> RpcAccount {
+        token_account_with_program(mint, owner, amount, decimals, token_2022_program_id())
+    }
+
+    fn token_account_with_program(
+        mint: Pubkey,
+        owner: Pubkey,
+        amount: &str,
+        decimals: u8,
+        token_program: Pubkey,
+    ) -> RpcAccount {
         RpcAccount {
-            owner_program: token_2022_program_id(),
+            owner_program: token_program,
             executable: false,
             parsed: Some(ParsedAccount::TokenAccount {
                 mint,

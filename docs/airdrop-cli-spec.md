@@ -17,7 +17,7 @@ The tool is an operator-run distribution workflow. It should preview the plan, r
 - Token address: the public address that identifies a Solana token.
 - Mint: Solana's technical term for a token address. In code and RPC APIs this is usually called a `mint`.
 - Distribution token: the Token-2022 token the CLI sends from the source wallet.
-- Target token: a token whose holders should be considered as possible recipients.
+- Target token: a token whose holders should be considered as possible recipients; target tokens may be legacy SPL or Token-2022 because they are read-only discovery inputs.
 - ATA: associated token account, the standard token account for one wallet and one token address.
 
 ## V0 Decisions
@@ -27,7 +27,7 @@ The tool is an operator-run distribution workflow. It should preview the plan, r
 - Keep Solscan as an optional future provider for larger holder lists.
 - Use `confirmed` commitment for all reads, simulations, sends, and confirmations.
 - Use `TransferChecked` for token transfers.
-- Support only Token-2022 in v0. If a configured target or distribution token is owned by the legacy SPL Token Program or any other token program, fail early with a clear unsupported-token-program message.
+- Support only Token-2022 for the distribution token in v0. Target tokens may be legacy SPL or Token-2022 because they are only used for read-only holder discovery. If the distribution token is not Token-2022, or a target token is not owned by a supported token program, fail early with a clear unsupported-token-program message.
 - Automatically create missing recipient ATAs when needed and include the estimated SOL rent exposure in the confirmation summary.
 - Automatically pack as many recipients as safely fit in each transaction.
 - Do not add Phantom-specific send delays. Phantom does not publish a safe cadence, and batching changes the shape of the traffic anyway.
@@ -125,7 +125,7 @@ Solana has two major token programs:
 
 Token-2022 matters because the token program ID, ATA derivation, account layout, and transfer behavior can differ from the original token program. Some extensions can change or block transfers entirely.
 
-V0 should keep this simple: detect the owner program for each configured target and distribution token address. If any configured token is not Token-2022, stop with a clear unsupported-token-program error. Associated token account derivation and transfer/simulation instructions must use the Token-2022 program id.
+V0 should keep this simple: detect the owner program for each configured token address. The distribution token must be Token-2022 because it is the token being sent. Target tokens may be legacy SPL or Token-2022 because they are read-only discovery inputs. Associated token account derivation and transfer/simulation instructions for the distribution token must use the Token-2022 program id.
 
 ## Target Discovery
 
@@ -269,7 +269,7 @@ No mainnet send test should be run without explicit user confirmation.
 - `max_recipients` is global after merging and excluding target holders.
 - The source wallet and fee payer are always the same keypair.
 - V0 supports only base58/base64 private-key environment variables, not keypair files or JSON keypair arrays.
-- Only Token-2022 mints are supported in v0; legacy SPL Token mints should be detected and rejected clearly.
+- The distribution mint must be Token-2022; target mints may be legacy SPL or Token-2022 for holder discovery.
 
 ## Deferred
 
@@ -279,7 +279,7 @@ No mainnet send test should be run without explicit user confirmation.
 - Per-target-token quota strategies.
 - Manual include overrides.
 - Non-mainnet operational mode.
-- Legacy SPL Token support.
+- Legacy SPL distribution-token support.
 
 ## Source Links
 
