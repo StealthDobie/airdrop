@@ -340,6 +340,11 @@ fn cached_run_artifacts_exist(run_dir: &Path) -> bool {
     run_dir.join("plan.json").is_file()
         && run_dir.join("simulation.json").is_file()
         && run_dir.join("ledger.jsonl").is_file()
+        && cached_run_ledger_is_empty(run_dir)
+}
+
+fn cached_run_ledger_is_empty(run_dir: &Path) -> bool {
+    fs::read_to_string(run_dir.join("ledger.jsonl")).is_ok_and(|ledger| ledger.trim().is_empty())
 }
 
 fn run_dir_name(run_dir: &Path) -> String {
@@ -536,11 +541,18 @@ mod tests {
         let old_run = runs_dir.join("100");
         let new_run = runs_dir.join("300");
         let incomplete_newer_run = runs_dir.join("400");
+        let sent_newer_run = runs_dir.join("500");
 
         write_cached_run_files(&old_run);
         write_cached_run_files(&new_run);
         fs::create_dir_all(&incomplete_newer_run).unwrap();
         fs::write(incomplete_newer_run.join("plan.json"), "{}").unwrap();
+        write_cached_run_files(&sent_newer_run);
+        fs::write(
+            sent_newer_run.join("ledger.jsonl"),
+            r#"{"event":"batch_confirmed"}"#,
+        )
+        .unwrap();
 
         let latest = latest_cached_run_dir(&runs_dir).unwrap();
 
