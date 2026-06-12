@@ -209,7 +209,7 @@ Send command:
 airdrop send --config config.toml
 ```
 
-If `runs/<run-id>/plan.json`, `simulation.json`, and `ledger.jsonl` exist from a previous dry run, `send` should offer the newest complete cached run before repeating discovery. The operator must type `Y` to use the cached run or `N` to run the full scan.
+If `runs/<run-id>/plan.json`, `simulation.json`, and `ledger.jsonl` exist from a previous dry run, `send` should offer the newest complete cached run before repeating discovery. The operator must type `Y` to use the cached run or `N` to run the full scan. Cached plans must include a config snapshot that matches the current config, and accepted cached plans must be re-simulated before the final send confirmation.
 
 Resume command:
 

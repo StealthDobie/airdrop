@@ -35,7 +35,7 @@ To submit the airdrop, run:
 cargo run -- send
 ```
 
-If a complete cached run exists under `runs/<run-id>/`, `send` asks whether to use the newest cached plan and simulation. Type `Y` to use it without repeating holder discovery, or `N` to run the full scan again. It refuses to submit if the source wallet SOL balance is below the estimated signature fees plus recipient ATA rent deposits. If funding is sufficient, it prints the final mainnet-beta summary and requires the exact confirmation phrase before signing and submitting transactions. Prepared, submitted, confirmed, and failed batches are appended to `runs/<run-id>/ledger.jsonl`.
+If a complete cached run exists under `runs/<run-id>/`, `send` asks whether to use the newest cached plan. Type `Y` to use it without repeating holder discovery and planning, or `N` to run the full scan again. Cached plans must match the current config, and `send` re-simulates the cached transactions before the final confirmation. It refuses to submit if the source wallet SOL balance is below the estimated signature fees plus recipient ATA rent deposits. If funding is sufficient, it prints the final mainnet-beta summary and requires the exact confirmation phrase before signing and submitting transactions. Prepared, submitted, confirmed, and failed batches are appended to `runs/<run-id>/ledger.jsonl`.
 
 If a send is interrupted or stops after some batches land, resume the saved plan instead of starting over:
 

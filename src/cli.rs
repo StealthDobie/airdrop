@@ -6,12 +6,13 @@ use {
             check_source_sol_funding, confirmation_matches, confirmation_phrase,
             required_sol_lamports, send_plan,
         },
-        planning::{create_distribution_plan, read_plan_artifacts, write_plan_artifacts},
+        planning::{
+            create_distribution_plan, read_plan_artifacts, validate_cached_plan_config,
+            write_plan_artifacts,
+        },
         rpc::HttpRpcClient,
         runtime::RuntimeConfig,
-        simulation::{
-            SimulationReport, read_simulation_artifact, simulate_plan, write_simulation_artifact,
-        },
+        simulation::{SimulationReport, simulate_plan, write_simulation_artifact},
         solscan::SolscanClient,
     },
     anyhow::Context,
@@ -207,7 +208,7 @@ fn prepare_run(config: PathBuf) -> anyhow::Result<PreparedRun> {
         &runtime.source_wallet.public_key(),
     )?;
     eprintln!("Writing plan artifacts");
-    let artifacts = write_plan_artifacts(&plan, Path::new(RUNS_DIR))?;
+    let artifacts = write_plan_artifacts(&plan, &runtime.config, Path::new(RUNS_DIR))?;
     eprintln!("Simulating planned transactions");
     let simulation_report = simulate_plan(&rpc, &plan)?;
     let simulation_artifact_path = write_simulation_artifact(&simulation_report, &artifacts)?;
@@ -235,12 +236,27 @@ fn prepare_run_for_send(config: PathBuf) -> anyhow::Result<PreparedRun> {
 
 fn prepare_cached_run(config: PathBuf, run_dir: PathBuf) -> anyhow::Result<PreparedRun> {
     let mut prepared = prepare_resume(config, run_dir)?;
-    let simulation_report = read_simulation_artifact(&prepared.artifacts).with_context(|| {
-        format!(
-            "failed to load cached simulation {}",
-            prepared.artifacts.simulation_path.display()
-        )
-    })?;
+    validate_cached_plan_config(&prepared.artifacts.run_dir, &prepared.runtime.config)
+        .with_context(|| {
+            format!(
+                "cached run {} does not match current config",
+                prepared.artifacts.run_dir.display()
+            )
+        })?;
+
+    eprintln!(
+        "Re-simulating cached run {} before send",
+        prepared.artifacts.run_dir.display()
+    );
+    let simulation_report = simulate_plan(&prepared.rpc, &prepared.plan)?;
+    let simulation_artifact_path =
+        write_simulation_artifact(&simulation_report, &prepared.artifacts).with_context(|| {
+            format!(
+                "failed to refresh cached simulation {}",
+                prepared.artifacts.simulation_path.display()
+            )
+        })?;
+    prepared.simulation_artifact_path = simulation_artifact_path;
     prepared.simulation_report = Some(simulation_report);
     ensure_simulation_success(&prepared)?;
     Ok(prepared)

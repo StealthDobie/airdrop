@@ -8,13 +8,12 @@ use {
         rpc::{RpcError, RpcSimulator, TransactionSimulation},
     },
     base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD},
-    serde::{Deserialize, Serialize},
+    serde::Serialize,
     solana_hash::Hash,
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_transaction::Transaction,
     std::{
-        fs,
         fs::File,
         io::Write,
         path::{Path, PathBuf},
@@ -65,17 +64,6 @@ pub fn write_simulation_artifact(
 ) -> Result<PathBuf, SimulationError> {
     write_json(&artifacts.simulation_path, report)?;
     Ok(artifacts.simulation_path.clone())
-}
-
-pub fn read_simulation_artifact(
-    artifacts: &PlanArtifacts,
-) -> Result<SimulationReport, SimulationError> {
-    let contents =
-        fs::read_to_string(&artifacts.simulation_path).map_err(|source| SimulationError::Read {
-            path: artifacts.simulation_path.display().to_string(),
-            source,
-        })?;
-    Ok(serde_json::from_str(&contents)?)
 }
 
 pub(crate) fn build_signed_batch_transaction(
@@ -243,7 +231,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), SimulationErro
         })
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SimulationReport {
     pub latest_blockhash: String,
     pub batches: Vec<BatchSimulation>,
@@ -265,7 +253,7 @@ impl SimulationReport {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BatchSimulation {
     pub batch_index: usize,
     pub recipient_count: usize,
@@ -319,12 +307,6 @@ pub enum SimulationError {
     },
     #[error("failed to write simulation artifact `{path}`: {source}")]
     Io {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to read simulation artifact `{path}`: {source}")]
-    Read {
         path: String,
         #[source]
         source: std::io::Error,
