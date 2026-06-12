@@ -236,13 +236,24 @@ fn prepare_run_for_send(config: PathBuf) -> anyhow::Result<PreparedRun> {
 
 fn prepare_cached_run(config: PathBuf, run_dir: PathBuf) -> anyhow::Result<PreparedRun> {
     let mut prepared = prepare_resume(config, run_dir)?;
-    validate_cached_plan_config(&prepared.artifacts.run_dir, &prepared.runtime.config)
-        .with_context(|| {
-            format!(
-                "cached run {} does not match current config",
-                prepared.artifacts.run_dir.display()
-            )
-        })?;
+    if let Err(error) =
+        validate_cached_plan_config(&prepared.artifacts.run_dir, &prepared.runtime.config)
+    {
+        println!(
+            "Cached run config validation warning for {}:",
+            prepared.artifacts.run_dir.display()
+        );
+        println!("{error}");
+        println!(
+            "Type `OVERRIDE {}` to use this cached plan anyway, or anything else to abort:",
+            prepared.artifacts.run_id
+        );
+        io::stdout().flush()?;
+        let input = read_confirmation_line()?;
+        if !cache_override_matches(&input, &prepared.artifacts.run_id) {
+            anyhow::bail!("cached run override not confirmed; no transactions sent");
+        }
+    }
 
     eprintln!(
         "Re-simulating cached run {} before send",
@@ -361,6 +372,10 @@ fn parse_cache_choice(input: &str) -> Option<bool> {
         "N" | "n" => Some(false),
         _ => None,
     }
+}
+
+fn cache_override_matches(input: &str, run_id: &str) -> bool {
+    input.trim() == format!("OVERRIDE {run_id}")
 }
 
 fn ensure_simulation_success(prepared: &PreparedRun) -> anyhow::Result<()> {
@@ -533,6 +548,23 @@ mod tests {
         assert_eq!(parse_cache_choice("n"), Some(false));
         assert_eq!(parse_cache_choice("yes"), None);
         assert_eq!(parse_cache_choice(""), None);
+    }
+
+    #[test]
+    fn validates_cache_override_phrase() {
+        assert!(cache_override_matches(
+            "OVERRIDE 1781258615075\n",
+            "1781258615075"
+        ));
+        assert!(!cache_override_matches(
+            "override 1781258615075\n",
+            "1781258615075"
+        ));
+        assert!(!cache_override_matches(
+            "OVERRIDE 1781258615076\n",
+            "1781258615075"
+        ));
+        assert!(!cache_override_matches("Y\n", "1781258615075"));
     }
 
     #[test]
