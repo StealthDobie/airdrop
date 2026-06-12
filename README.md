@@ -27,7 +27,7 @@ cargo run -- validate
 cargo run -- run
 ```
 
-`run` is no-send. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, simulates every planned transaction, and writes artifacts under `runs/<run-id>/`. The simulation path uses unsigned transactions with RPC signature verification disabled.
+`run` is no-send. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, excludes wallets with an existing distribution-token account even when that account has a zero balance, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, simulates every planned transaction, and writes artifacts under `runs/<run-id>/`. The simulation path uses unsigned transactions with RPC signature verification disabled.
 
 To submit the airdrop, run:
 
@@ -35,7 +35,7 @@ To submit the airdrop, run:
 cargo run -- send
 ```
 
-`send` repeats the full plan and simulation first. It refuses to submit if the source wallet SOL balance is below the estimated signature fees plus recipient ATA rent deposits. If funding is sufficient, it prints the final mainnet-beta summary and requires the exact confirmation phrase before signing and submitting transactions. Prepared, submitted, confirmed, and failed batches are appended to `runs/<run-id>/ledger.jsonl`.
+If a complete dry-run cache exists under `runs/<run-id>/` with an empty `ledger.jsonl`, `send` asks whether to use the newest cached plan. Type `Y` to use it without repeating holder discovery and planning, or `N` to run the full scan again. Cached plans should match the current config; if the config snapshot is missing or mismatched, `send` prints the warning and requires `OVERRIDE <run-id>` before continuing. `send` re-simulates cached transactions before the final confirmation. It refuses to submit if the source wallet SOL balance is below the estimated signature fees plus recipient ATA rent deposits. If funding is sufficient, it prints the final mainnet-beta summary and requires the exact confirmation phrase before signing and submitting transactions. Prepared, submitted, confirmed, and failed batches are appended to `runs/<run-id>/ledger.jsonl`.
 
 If a send is interrupted or stops after some batches land, resume the saved plan instead of starting over:
 

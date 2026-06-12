@@ -6,7 +6,10 @@ use {
             check_source_sol_funding, confirmation_matches, confirmation_phrase,
             required_sol_lamports, send_plan,
         },
-        planning::{create_distribution_plan, read_plan_artifacts, write_plan_artifacts},
+        planning::{
+            create_distribution_plan, read_plan_artifacts, validate_cached_plan_config,
+            write_plan_artifacts,
+        },
         rpc::HttpRpcClient,
         runtime::RuntimeConfig,
         simulation::{SimulationReport, simulate_plan, write_simulation_artifact},
@@ -15,11 +18,14 @@ use {
     anyhow::Context,
     clap::{Parser, Subcommand},
     std::{
+        fs,
         fs::File,
         io::{self, BufRead, Write},
         path::{Path, PathBuf},
     },
 };
+
+const RUNS_DIR: &str = "runs";
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -74,10 +80,19 @@ fn run_dry(config: PathBuf) -> anyhow::Result<()> {
 fn send(config: PathBuf, resume: Option<PathBuf>) -> anyhow::Result<()> {
     let prepared = if let Some(run_dir) = resume {
         prepare_resume(config, run_dir)?
+    } else if let Some(run_dir) = latest_cached_run_dir(Path::new(RUNS_DIR))? {
+        println!("Cached run found: {}", run_dir.display());
+        println!("Type `Y` to use this cached run, or `N` to run the full scan:");
+        io::stdout().flush()?;
+        let input = read_confirmation_line()?;
+        match parse_cache_choice(&input) {
+            Some(true) => prepare_cached_run(config, run_dir)?,
+            Some(false) => prepare_run_for_send(config)?,
+            None => anyhow::bail!("expected `Y` or `N`; no transactions sent"),
+        }
     } else {
-        let prepared = prepare_run(config)?;
-        ensure_simulation_success(&prepared)?;
-        prepared
+        eprintln!("No cached run found; running full scan");
+        prepare_run_for_send(config)?
     };
     print_plan_summary(&prepared, send_summary_heading(&prepared));
 
@@ -193,7 +208,7 @@ fn prepare_run(config: PathBuf) -> anyhow::Result<PreparedRun> {
         &runtime.source_wallet.public_key(),
     )?;
     eprintln!("Writing plan artifacts");
-    let artifacts = write_plan_artifacts(&plan, Path::new("runs"))?;
+    let artifacts = write_plan_artifacts(&plan, &runtime.config, Path::new(RUNS_DIR))?;
     eprintln!("Simulating planned transactions");
     let simulation_report = simulate_plan(&rpc, &plan)?;
     let simulation_artifact_path = write_simulation_artifact(&simulation_report, &artifacts)?;
@@ -211,6 +226,51 @@ fn prepare_run(config: PathBuf) -> anyhow::Result<PreparedRun> {
         simulation_report: Some(simulation_report),
         simulation_artifact_path,
     })
+}
+
+fn prepare_run_for_send(config: PathBuf) -> anyhow::Result<PreparedRun> {
+    let prepared = prepare_run(config)?;
+    ensure_simulation_success(&prepared)?;
+    Ok(prepared)
+}
+
+fn prepare_cached_run(config: PathBuf, run_dir: PathBuf) -> anyhow::Result<PreparedRun> {
+    let mut prepared = prepare_resume(config, run_dir)?;
+    if let Err(error) =
+        validate_cached_plan_config(&prepared.artifacts.run_dir, &prepared.runtime.config)
+    {
+        println!(
+            "Cached run config validation warning for {}:",
+            prepared.artifacts.run_dir.display()
+        );
+        println!("{error}");
+        println!(
+            "Type `OVERRIDE {}` to use this cached plan anyway, or anything else to abort:",
+            prepared.artifacts.run_id
+        );
+        io::stdout().flush()?;
+        let input = read_confirmation_line()?;
+        if !cache_override_matches(&input, &prepared.artifacts.run_id) {
+            anyhow::bail!("cached run override not confirmed; no transactions sent");
+        }
+    }
+
+    eprintln!(
+        "Re-simulating cached run {} before send",
+        prepared.artifacts.run_dir.display()
+    );
+    let simulation_report = simulate_plan(&prepared.rpc, &prepared.plan)?;
+    let simulation_artifact_path =
+        write_simulation_artifact(&simulation_report, &prepared.artifacts).with_context(|| {
+            format!(
+                "failed to refresh cached simulation {}",
+                prepared.artifacts.simulation_path.display()
+            )
+        })?;
+    prepared.simulation_artifact_path = simulation_artifact_path;
+    prepared.simulation_report = Some(simulation_report);
+    ensure_simulation_success(&prepared)?;
+    Ok(prepared)
 }
 
 fn prepare_resume(config: PathBuf, run_dir: PathBuf) -> anyhow::Result<PreparedRun> {
@@ -251,6 +311,71 @@ fn prepare_resume(config: PathBuf, run_dir: PathBuf) -> anyhow::Result<PreparedR
         simulation_report: None,
         simulation_artifact_path,
     })
+}
+
+fn latest_cached_run_dir(runs_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let entries = match fs::read_dir(runs_dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(source)
+                .with_context(|| format!("failed to read runs directory {}", runs_dir.display()));
+        }
+    };
+    let mut candidates = Vec::new();
+
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("failed to read runs directory {}", runs_dir.display()))?;
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "failed to inspect run directory entry {}",
+                entry.path().display()
+            )
+        })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let run_dir = entry.path();
+        if cached_run_artifacts_exist(&run_dir) {
+            candidates.push(run_dir);
+        }
+    }
+
+    candidates.sort_by_key(|run_dir| run_dir_name(run_dir));
+    Ok(candidates.pop())
+}
+
+fn cached_run_artifacts_exist(run_dir: &Path) -> bool {
+    run_dir.join("plan.json").is_file()
+        && run_dir.join("simulation.json").is_file()
+        && run_dir.join("ledger.jsonl").is_file()
+        && cached_run_ledger_is_empty(run_dir)
+}
+
+fn cached_run_ledger_is_empty(run_dir: &Path) -> bool {
+    fs::read_to_string(run_dir.join("ledger.jsonl")).is_ok_and(|ledger| ledger.trim().is_empty())
+}
+
+fn run_dir_name(run_dir: &Path) -> String {
+    run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn parse_cache_choice(input: &str) -> Option<bool> {
+    match input.trim() {
+        "Y" | "y" => Some(true),
+        "N" | "n" => Some(false),
+        _ => None,
+    }
+}
+
+fn cache_override_matches(input: &str, run_id: &str) -> bool {
+    input.trim() == format!("OVERRIDE {run_id}")
 }
 
 fn ensure_simulation_success(prepared: &PreparedRun) -> anyhow::Result<()> {
@@ -403,6 +528,7 @@ fn format_lamports_as_sol(lamports: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn formats_lamports_as_sol_without_rounding() {
@@ -412,5 +538,81 @@ mod tests {
         assert_eq!(format_lamports_as_sol(701_512_320), "0.70151232");
         assert_eq!(format_lamports_as_sol(1_000_000_000), "1");
         assert_eq!(format_lamports_as_sol(1_234_567_890), "1.23456789");
+    }
+
+    #[test]
+    fn parses_cache_choice() {
+        assert_eq!(parse_cache_choice("Y\n"), Some(true));
+        assert_eq!(parse_cache_choice("y"), Some(true));
+        assert_eq!(parse_cache_choice("N\n"), Some(false));
+        assert_eq!(parse_cache_choice("n"), Some(false));
+        assert_eq!(parse_cache_choice("yes"), None);
+        assert_eq!(parse_cache_choice(""), None);
+    }
+
+    #[test]
+    fn validates_cache_override_phrase() {
+        assert!(cache_override_matches(
+            "OVERRIDE 1781258615075\n",
+            "1781258615075"
+        ));
+        assert!(!cache_override_matches(
+            "override 1781258615075\n",
+            "1781258615075"
+        ));
+        assert!(!cache_override_matches(
+            "OVERRIDE 1781258615076\n",
+            "1781258615075"
+        ));
+        assert!(!cache_override_matches("Y\n", "1781258615075"));
+    }
+
+    #[test]
+    fn finds_latest_complete_cached_run() {
+        let runs_dir = temp_runs_dir();
+        let old_run = runs_dir.join("100");
+        let new_run = runs_dir.join("300");
+        let incomplete_newer_run = runs_dir.join("400");
+        let sent_newer_run = runs_dir.join("500");
+
+        write_cached_run_files(&old_run);
+        write_cached_run_files(&new_run);
+        fs::create_dir_all(&incomplete_newer_run).unwrap();
+        fs::write(incomplete_newer_run.join("plan.json"), "{}").unwrap();
+        write_cached_run_files(&sent_newer_run);
+        fs::write(
+            sent_newer_run.join("ledger.jsonl"),
+            r#"{"event":"batch_confirmed"}"#,
+        )
+        .unwrap();
+
+        let latest = latest_cached_run_dir(&runs_dir).unwrap();
+
+        assert_eq!(latest, Some(new_run));
+        fs::remove_dir_all(runs_dir).unwrap();
+    }
+
+    #[test]
+    fn missing_runs_dir_has_no_cached_run() {
+        let runs_dir = temp_runs_dir();
+
+        let latest = latest_cached_run_dir(&runs_dir).unwrap();
+
+        assert_eq!(latest, None);
+    }
+
+    fn write_cached_run_files(run_dir: &Path) {
+        fs::create_dir_all(run_dir).unwrap();
+        fs::write(run_dir.join("plan.json"), "{}").unwrap();
+        fs::write(run_dir.join("simulation.json"), "{}").unwrap();
+        fs::write(run_dir.join("ledger.jsonl"), "").unwrap();
+    }
+
+    fn temp_runs_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("airdrop-cli-cache-test-{nanos}"))
     }
 }

@@ -211,6 +211,7 @@ fn plan_recipient(
 
 pub fn write_plan_artifacts(
     plan: &DistributionPlan,
+    config: &ValidatedConfig,
     runs_dir: impl AsRef<Path>,
 ) -> Result<PlanArtifacts, PlanError> {
     let run_id = run_id()?;
@@ -227,7 +228,10 @@ pub fn write_plan_artifacts(
         simulation_path: run_dir.join("simulation.json"),
     };
 
-    write_json(&artifacts.plan_path, &PlanJson::from_plan(plan, &artifacts))?;
+    write_json(
+        &artifacts.plan_path,
+        &PlanJson::from_plan(plan, config, &artifacts),
+    )?;
     write_recipients_csv(&artifacts.recipients_path, plan)?;
     write_skipped_csv(&artifacts.skipped_path, plan)?;
     write_text(&artifacts.ledger_path, "")?;
@@ -238,23 +242,7 @@ pub fn write_plan_artifacts(
 pub fn read_plan_artifacts(
     run_dir: impl AsRef<Path>,
 ) -> Result<(DistributionPlan, PlanArtifacts), PlanError> {
-    let run_dir = run_dir.as_ref().to_path_buf();
-    let run_id = run_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| PlanError::InvalidRunDirectory {
-            path: run_dir.display().to_string(),
-        })?
-        .to_owned();
-    let artifacts = PlanArtifacts {
-        run_id,
-        run_dir: run_dir.clone(),
-        plan_path: run_dir.join("plan.json"),
-        recipients_path: run_dir.join("recipients.csv"),
-        skipped_path: run_dir.join("skipped.csv"),
-        ledger_path: run_dir.join("ledger.jsonl"),
-        simulation_path: run_dir.join("simulation.json"),
-    };
+    let artifacts = plan_artifacts_for_run_dir(run_dir.as_ref())?;
     let contents = fs::read_to_string(&artifacts.plan_path).map_err(|source| PlanError::Read {
         path: artifacts.plan_path.display().to_string(),
         source,
@@ -263,6 +251,46 @@ pub fn read_plan_artifacts(
     let plan = plan_json.into_plan(&artifacts.plan_path)?;
 
     Ok((plan, artifacts))
+}
+
+pub fn validate_cached_plan_config(
+    run_dir: impl AsRef<Path>,
+    config: &ValidatedConfig,
+) -> Result<(), PlanError> {
+    let artifacts = plan_artifacts_for_run_dir(run_dir.as_ref())?;
+    let contents = fs::read_to_string(&artifacts.plan_path).map_err(|source| PlanError::Read {
+        path: artifacts.plan_path.display().to_string(),
+        source,
+    })?;
+    let plan_json: PlanJson = serde_json::from_str(&contents)?;
+    let cached_config = plan_json
+        .config
+        .ok_or_else(|| PlanError::MissingPlanConfigSnapshot {
+            path: artifacts.plan_path.display().to_string(),
+        })?;
+
+    cached_config.validate_matches(config, &artifacts.plan_path)
+}
+
+fn plan_artifacts_for_run_dir(run_dir: &Path) -> Result<PlanArtifacts, PlanError> {
+    let run_dir = run_dir.to_path_buf();
+    let run_id = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| PlanError::InvalidRunDirectory {
+            path: run_dir.display().to_string(),
+        })?
+        .to_owned();
+
+    Ok(PlanArtifacts {
+        run_id,
+        run_dir: run_dir.clone(),
+        plan_path: run_dir.join("plan.json"),
+        recipients_path: run_dir.join("recipients.csv"),
+        skipped_path: run_dir.join("skipped.csv"),
+        ledger_path: run_dir.join("ledger.jsonl"),
+        simulation_path: run_dir.join("simulation.json"),
+    })
 }
 
 fn pack_recipients(
@@ -904,10 +932,25 @@ pub enum PlanError {
     },
     #[error("plan artifact `{path}` has invalid skip reason `{value}`")]
     InvalidPlanSkipReason { path: String, value: String },
+    #[error(
+        "plan artifact `{path}` does not include a config snapshot; run `airdrop run` again before using automatic send cache"
+    )]
+    MissingPlanConfigSnapshot { path: String },
+    #[error(
+        "plan artifact `{path}` config mismatch for {field}: cached `{cached}`, current `{current}`"
+    )]
+    PlanConfigMismatch {
+        path: String,
+        field: &'static str,
+        cached: String,
+        current: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct PlanJson {
+    #[serde(default)]
+    config: Option<PlanConfigJson>,
     summary: PlanSummaryJson,
     recipients: Vec<RecipientJson>,
     skipped: Vec<SkippedJson>,
@@ -916,8 +959,13 @@ struct PlanJson {
 }
 
 impl PlanJson {
-    fn from_plan(plan: &DistributionPlan, artifacts: &PlanArtifacts) -> Self {
+    fn from_plan(
+        plan: &DistributionPlan,
+        config: &ValidatedConfig,
+        artifacts: &PlanArtifacts,
+    ) -> Self {
         Self {
+            config: Some(PlanConfigJson::from_config(config)),
             summary: PlanSummaryJson::from_plan(plan),
             recipients: plan.recipients.iter().map(RecipientJson::from).collect(),
             skipped: plan.skipped.iter().map(SkippedJson::from).collect(),
@@ -979,6 +1027,108 @@ impl PlanJson {
             estimated_signature_fee_lamports: summary.estimated_signature_fee_lamports,
         })
     }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PlanConfigJson {
+    cluster_name: String,
+    distribution_token_address: String,
+    total_amount_ui: String,
+    target_token_addresses: Vec<String>,
+    max_recipients: usize,
+    manual_exclude_wallets: Vec<String>,
+    solscan_enabled: bool,
+    solscan_holder_fetch_limit: usize,
+}
+
+impl PlanConfigJson {
+    fn from_config(config: &ValidatedConfig) -> Self {
+        Self {
+            cluster_name: config.cluster_name.clone(),
+            distribution_token_address: config.distribution_token_address.to_string(),
+            total_amount_ui: config.total_amount_ui.clone(),
+            target_token_addresses: pubkey_strings(&config.target_token_addresses),
+            max_recipients: config.max_recipients,
+            manual_exclude_wallets: pubkey_strings(&config.manual_exclude_wallets),
+            solscan_enabled: config.solscan.enabled,
+            solscan_holder_fetch_limit: config.solscan.holder_fetch_limit,
+        }
+    }
+
+    fn validate_matches(self, config: &ValidatedConfig, path: &Path) -> Result<(), PlanError> {
+        let current = Self::from_config(config);
+
+        require_cached_config_match(
+            path,
+            "cluster.name",
+            self.cluster_name,
+            current.cluster_name,
+        )?;
+        require_cached_config_match(
+            path,
+            "distribution.token_address",
+            self.distribution_token_address,
+            current.distribution_token_address,
+        )?;
+        require_cached_config_match(
+            path,
+            "distribution.total_amount_ui",
+            self.total_amount_ui,
+            current.total_amount_ui,
+        )?;
+        require_cached_config_match(
+            path,
+            "targeting.target_token_addresses",
+            self.target_token_addresses.join(","),
+            current.target_token_addresses.join(","),
+        )?;
+        require_cached_config_match(
+            path,
+            "targeting.max_recipients",
+            self.max_recipients.to_string(),
+            current.max_recipients.to_string(),
+        )?;
+        require_cached_config_match(
+            path,
+            "targeting.manual_exclude_wallets",
+            self.manual_exclude_wallets.join(","),
+            current.manual_exclude_wallets.join(","),
+        )?;
+        require_cached_config_match(
+            path,
+            "providers.solscan.enabled",
+            self.solscan_enabled.to_string(),
+            current.solscan_enabled.to_string(),
+        )?;
+        require_cached_config_match(
+            path,
+            "providers.solscan.holder_fetch_limit",
+            self.solscan_holder_fetch_limit.to_string(),
+            current.solscan_holder_fetch_limit.to_string(),
+        )
+    }
+}
+
+fn pubkey_strings(values: &[Pubkey]) -> Vec<String> {
+    values.iter().map(ToString::to_string).collect()
+}
+
+fn require_cached_config_match(
+    path: &Path,
+    field: &'static str,
+    cached: String,
+    current: String,
+) -> Result<(), PlanError> {
+    if cached == current {
+        return Ok(());
+    }
+
+    Err(PlanError::PlanConfigMismatch {
+        path: path.display().to_string(),
+        field,
+        cached,
+        current,
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1270,6 +1420,7 @@ fn parse_skip_reason(path: &Path, value: &str) -> Result<SkipReason, PlanError> 
         "ExecutableOwner" => SkipReason::ExecutableOwner,
         "ProgramOwnedOwner" => SkipReason::ProgramOwnedOwner,
         "ExistingDistributionHolder" => SkipReason::ExistingDistributionHolder,
+        "ExistingDistributionAccount" => SkipReason::ExistingDistributionAccount,
         "RecipientLimit" => SkipReason::RecipientLimit,
         _ => {
             return Err(PlanError::InvalidPlanSkipReason {
@@ -1467,12 +1618,17 @@ mod tests {
             .unwrap();
         let runs_dir = std::env::temp_dir().join(format!("airdrop-plan-test-{}", pubkey()));
 
-        let artifacts = write_plan_artifacts(&plan, &runs_dir).unwrap();
+        let artifacts = write_plan_artifacts(&plan, &config, &runs_dir).unwrap();
 
         assert!(artifacts.plan_path.exists());
         assert!(artifacts.recipients_path.exists());
         assert!(artifacts.skipped_path.exists());
         assert!(artifacts.ledger_path.exists());
+        assert!(
+            fs::read_to_string(&artifacts.plan_path)
+                .unwrap()
+                .contains("\"config\"")
+        );
         assert!(
             fs::read_to_string(&artifacts.plan_path)
                 .unwrap()
@@ -1492,6 +1648,17 @@ mod tests {
         assert_eq!(loaded_plan.recipients, plan.recipients);
         assert_eq!(loaded_plan.batches, plan.batches);
         assert_eq!(loaded_artifacts.ledger_path, artifacts.ledger_path);
+        validate_cached_plan_config(&artifacts.run_dir, &config).unwrap();
+
+        let mismatch =
+            validate_cached_plan_config(&artifacts.run_dir, &fixture.config("3")).unwrap_err();
+        assert!(matches!(
+            mismatch,
+            PlanError::PlanConfigMismatch {
+                field: "distribution.total_amount_ui",
+                ..
+            }
+        ));
 
         fs::remove_dir_all(runs_dir).unwrap();
     }
