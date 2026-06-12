@@ -550,18 +550,20 @@ fn exclusion_reason(
         }
     }
 
-    if let Some(existing_distribution_holders) = existing_distribution_holders {
-        if existing_distribution_holders.contains(owner_wallet) {
-            return Ok(Some(SkipReason::ExistingDistributionHolder));
-        }
-    } else if owner_has_positive_distribution_balance(rpc, owner_wallet, distribution_token)? {
+    if let Some(existing_distribution_holders) = existing_distribution_holders
+        && existing_distribution_holders.contains(owner_wallet)
+    {
+        return Ok(Some(SkipReason::ExistingDistributionHolder));
+    }
+
+    if owner_has_distribution_token_account(rpc, owner_wallet, distribution_token)? {
         return Ok(Some(SkipReason::ExistingDistributionHolder));
     }
 
     Ok(None)
 }
 
-fn owner_has_positive_distribution_balance(
+fn owner_has_distribution_token_account(
     rpc: &impl RpcReader,
     owner_wallet: &Pubkey,
     distribution_token: &TokenMetadata,
@@ -572,10 +574,11 @@ fn owner_has_positive_distribution_balance(
         if token_account.account.owner_program != distribution_token.token_program {
             continue;
         }
-        let Some(ParsedAccount::TokenAccount { amount, .. }) = token_account.account.parsed else {
+        let Some(ParsedAccount::TokenAccount { mint, owner, .. }) = token_account.account.parsed
+        else {
             continue;
         };
-        if parse_raw_amount(&amount).unwrap_or(0) > 0 {
+        if mint == distribution_token.token_address && owner == *owner_wallet {
             return Ok(true);
         }
     }
@@ -1132,7 +1135,7 @@ mod tests {
             (existing_holder, distribution),
             vec![RpcTokenAccount {
                 token_account: distribution_holder_account,
-                account: token_account(distribution, existing_holder, "1", 6),
+                account: token_account(distribution, existing_holder, "0", 6),
             }],
         );
 
@@ -1164,6 +1167,67 @@ mod tests {
                 SkipReason::ProgramOwnedOwner,
                 SkipReason::ZeroBalance,
             ]
+        );
+    }
+
+    #[test]
+    fn checks_rpc_for_existing_distribution_accounts_missing_from_prefetch() {
+        let distribution = pubkey();
+        let target = pubkey();
+        let source_wallet = keypair_pubkey();
+        let owner = keypair_pubkey();
+        let token_account_address = pubkey();
+        let distribution_holder_account = pubkey();
+
+        let mut rpc = MockRpc::default();
+        rpc.accounts.insert(distribution, mint_account(6));
+        rpc.accounts.insert(target, mint_account(6));
+        rpc.accounts.insert(owner, system_account());
+        rpc.owned_token_accounts.insert(
+            (owner, distribution),
+            vec![RpcTokenAccount {
+                token_account: distribution_holder_account,
+                account: token_account(distribution, owner, "0", 6),
+            }],
+        );
+
+        let mut provider = MockHolderProvider::default();
+        provider.holders.insert(
+            target,
+            vec![balance_with_owner(token_account_address, owner, "100", 6)],
+        );
+        let existing_distribution_holders = BTreeSet::new();
+
+        let config = ValidatedConfig {
+            cluster_name: "mainnet-beta".to_owned(),
+            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
+            distribution_token_address: distribution,
+            total_amount_ui: "1000".to_owned(),
+            target_token_addresses: vec![target],
+            max_recipients: 100,
+            manual_exclude_wallets: vec![],
+            solscan: crate::config::ValidatedSolscanConfig {
+                enabled: true,
+                api_key_env: "SOLSCAN_API_KEY".to_owned(),
+                holder_fetch_limit: 100,
+            },
+        };
+
+        let report = discover_holders_with_provider(
+            &rpc,
+            &provider,
+            &config,
+            &source_wallet,
+            Some(&existing_distribution_holders),
+        )
+        .unwrap();
+
+        assert!(report.recipients.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].owner_wallet, Some(owner));
+        assert_eq!(
+            report.skipped[0].reason,
+            SkipReason::ExistingDistributionHolder
         );
     }
 

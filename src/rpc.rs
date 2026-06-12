@@ -419,7 +419,7 @@ pub struct RpcTokenAccount {
     pub account: RpcAccount,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct TransactionSimulation {
     pub err: Option<Value>,
     pub logs: Vec<String>,
