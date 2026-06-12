@@ -1420,6 +1420,7 @@ fn parse_skip_reason(path: &Path, value: &str) -> Result<SkipReason, PlanError> 
         "ExecutableOwner" => SkipReason::ExecutableOwner,
         "ProgramOwnedOwner" => SkipReason::ProgramOwnedOwner,
         "ExistingDistributionHolder" => SkipReason::ExistingDistributionHolder,
+        "ExistingDistributionAccount" => SkipReason::ExistingDistributionAccount,
         "RecipientLimit" => SkipReason::RecipientLimit,
         _ => {
             return Err(PlanError::InvalidPlanSkipReason {

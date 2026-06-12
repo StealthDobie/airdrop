@@ -139,6 +139,8 @@ For each configured `target_token_addresses` entry:
 5. Discard zero-balance rows and malformed account data.
 6. Merge candidates across target token addresses.
 
+After candidate owner resolution, exclude wallets that already have a valid distribution-token account, including initialized accounts whose current distribution-token balance is `0`. Positive balances discovered through the indexed holder fast path are recorded as `ExistingDistributionHolder`; account-existence exclusions found through RPC are recorded as `ExistingDistributionAccount`.
+
 RPC v0 discovery limit:
 
 - RPC returns up to 20 token accounts per target token address.
@@ -288,7 +290,7 @@ Before implementation is considered ready:
 - Unit tests for config validation, amount parsing, dedupe, ranking, exclusion reasons, and secret redaction.
 - Unit tests for transaction auto-packing against serialized-size, account, and instruction limits.
 - Unit tests for plan math, including uneven totals and decimal conversion.
-- Mock RPC tests for target holder discovery and existing distribution-token holder exclusion.
+- Mock RPC tests for target holder discovery and existing distribution-token account exclusion, including zero-balance account exclusion.
 - Unit tests for Solscan holder parsing and external-provider discovery.
 - Dry-run integration test against devnet or local validator with a test token.
 - Mainnet-beta read-only smoke test for holder discovery and source balance.

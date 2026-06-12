@@ -557,7 +557,7 @@ fn exclusion_reason(
     }
 
     if owner_has_distribution_token_account(rpc, owner_wallet, distribution_token)? {
-        return Ok(Some(SkipReason::ExistingDistributionHolder));
+        return Ok(Some(SkipReason::ExistingDistributionAccount));
     }
 
     Ok(None)
@@ -681,6 +681,7 @@ pub enum SkipReason {
     ExecutableOwner,
     ProgramOwnedOwner,
     ExistingDistributionHolder,
+    ExistingDistributionAccount,
     RecipientLimit,
 }
 
@@ -1163,7 +1164,7 @@ mod tests {
             vec![
                 SkipReason::SourceWallet,
                 SkipReason::ManualExclude,
-                SkipReason::ExistingDistributionHolder,
+                SkipReason::ExistingDistributionAccount,
                 SkipReason::ProgramOwnedOwner,
                 SkipReason::ZeroBalance,
             ]
@@ -1227,7 +1228,7 @@ mod tests {
         assert_eq!(report.skipped[0].owner_wallet, Some(owner));
         assert_eq!(
             report.skipped[0].reason,
-            SkipReason::ExistingDistributionHolder
+            SkipReason::ExistingDistributionAccount
         );
     }
 

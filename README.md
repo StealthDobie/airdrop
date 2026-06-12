@@ -27,7 +27,7 @@ cargo run -- validate
 cargo run -- run
 ```
 
-`run` is no-send. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, simulates every planned transaction, and writes artifacts under `runs/<run-id>/`. The simulation path uses unsigned transactions with RPC signature verification disabled.
+`run` is no-send. It reads mainnet-beta state, requires the distribution token to be Token-2022, supports legacy SPL or Token-2022 target mints for read-only holder discovery, excludes wallets with an existing distribution-token account even when that account has a zero balance, checks the source distribution-token ATA and balance, calculates the per-recipient amount, plans legacy transaction batches, simulates every planned transaction, and writes artifacts under `runs/<run-id>/`. The simulation path uses unsigned transactions with RPC signature verification disabled.
 
 To submit the airdrop, run:
 
