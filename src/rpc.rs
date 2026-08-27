@@ -30,10 +30,10 @@ pub trait RpcReader {
         &self,
         mint: &Pubkey,
     ) -> Result<Vec<TokenAccountBalance>, RpcError>;
-    fn get_token_accounts_by_owner(
+    fn get_token_accounts_by_mint(
         &self,
-        owner: &Pubkey,
         mint: &Pubkey,
+        token_program: &Pubkey,
     ) -> Result<Vec<RpcTokenAccount>, RpcError>;
     fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64, RpcError>;
 }
@@ -241,27 +241,31 @@ impl RpcReader for HttpRpcClient {
             .collect()
     }
 
-    fn get_token_accounts_by_owner(
+    fn get_token_accounts_by_mint(
         &self,
-        owner: &Pubkey,
         mint: &Pubkey,
+        token_program: &Pubkey,
     ) -> Result<Vec<RpcTokenAccount>, RpcError> {
-        let response = self.request_context_value::<Vec<JsonTokenAccountWithPubkey>>(
-            "getTokenAccountsByOwner",
+        let response = self.request::<Vec<JsonTokenAccountWithPubkey>>(
+            "getProgramAccounts",
             json!([
-                owner.to_string(),
-                {
-                    "mint": mint.to_string()
-                },
+                token_program.to_string(),
                 {
                     "encoding": "jsonParsed",
-                    "commitment": CONFIRMED_COMMITMENT
+                    "commitment": CONFIRMED_COMMITMENT,
+                    "filters": [
+                        {
+                            "memcmp": {
+                                "offset": 0,
+                                "bytes": mint.to_string()
+                            }
+                        }
+                    ]
                 }
             ]),
         )?;
 
         response
-            .value
             .into_iter()
             .map(RpcTokenAccount::try_from)
             .collect()
@@ -680,7 +684,7 @@ impl TryFrom<JsonTokenAccountWithPubkey> for RpcTokenAccount {
     type Error = RpcError;
 
     fn try_from(value: JsonTokenAccountWithPubkey) -> Result<Self, Self::Error> {
-        let token_account = parse_pubkey("getTokenAccountsByOwner.pubkey", &value.pubkey)?;
+        let token_account = parse_pubkey("getProgramAccounts.pubkey", &value.pubkey)?;
         let account =
             RpcAccount::try_from(value.account).map_err(|source| RpcError::InvalidAccount {
                 address: token_account,
