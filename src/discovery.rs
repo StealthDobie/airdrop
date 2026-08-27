@@ -20,7 +20,7 @@ pub fn discover_holders(
     config: &ValidatedConfig,
     source_wallet: &Pubkey,
 ) -> Result<DiscoveryReport, DiscoveryError> {
-    discover_holders_with_provider(rpc, rpc, config, source_wallet, None)
+    discover_holders_with_provider(rpc, rpc, config, source_wallet)
 }
 
 pub fn discover_holders_with_solscan(
@@ -29,27 +29,7 @@ pub fn discover_holders_with_solscan(
     config: &ValidatedConfig,
     source_wallet: &Pubkey,
 ) -> Result<DiscoveryReport, DiscoveryError> {
-    eprintln!(
-        "Solscan: preloading existing distribution-token holders for {}",
-        config.distribution_token_address
-    );
-    let existing_distribution_holders = solscan
-        .get_all_token_holders(&config.distribution_token_address)?
-        .into_iter()
-        .filter_map(|holder| holder.owner_wallet)
-        .collect::<BTreeSet<_>>();
-    eprintln!(
-        "Solscan: loaded {} existing distribution holder(s)",
-        existing_distribution_holders.len()
-    );
-
-    discover_holders_with_provider(
-        rpc,
-        solscan,
-        config,
-        source_wallet,
-        Some(&existing_distribution_holders),
-    )
+    discover_holders_with_provider(rpc, solscan, config, source_wallet)
 }
 
 fn discover_holders_with_provider(
@@ -57,13 +37,23 @@ fn discover_holders_with_provider(
     holder_provider: &impl HolderProvider,
     config: &ValidatedConfig,
     source_wallet: &Pubkey,
-    existing_distribution_holders: Option<&BTreeSet<Pubkey>>,
 ) -> Result<DiscoveryReport, DiscoveryError> {
     eprintln!(
         "Validating distribution token {}",
         config.distribution_token_address
     );
     let distribution_token = validate_token_2022_mint(rpc, &config.distribution_token_address)?;
+    eprintln!(
+        "Preloading existing distribution-token accounts for {}",
+        distribution_token.token_address
+    );
+    let existing_distribution_accounts =
+        load_existing_distribution_accounts(rpc, &distribution_token)?;
+    eprintln!(
+        "Loaded {} existing distribution-token account owner(s), including {} current holder(s)",
+        existing_distribution_accounts.owners.len(),
+        existing_distribution_accounts.holders.len()
+    );
     eprintln!(
         "Validating {} target token(s)",
         config.target_token_addresses.len()
@@ -134,14 +124,12 @@ fn discover_holders_with_provider(
 
         for (candidate, owner_account) in verified_at_rank.into_iter().zip(owner_accounts) {
             if let Some(reason) = exclusion_reason(
-                rpc,
                 &candidate.owner_wallet,
                 owner_account.as_ref(),
                 source_wallet,
                 &config.manual_exclude_wallets,
-                &distribution_token,
-                existing_distribution_holders,
-            )? {
+                &existing_distribution_accounts,
+            ) {
                 skipped.push(SkippedCandidate::from_candidate(candidate, reason));
                 continue;
             }
@@ -519,71 +507,88 @@ fn verify_candidate_token_account(
     }))
 }
 
-fn exclusion_reason(
+#[derive(Default)]
+struct ExistingDistributionAccounts {
+    owners: BTreeSet<Pubkey>,
+    holders: BTreeSet<Pubkey>,
+}
+
+fn load_existing_distribution_accounts(
     rpc: &impl RpcReader,
+    distribution_token: &TokenMetadata,
+) -> Result<ExistingDistributionAccounts, DiscoveryError> {
+    let mut existing = ExistingDistributionAccounts::default();
+
+    for token_account in rpc.get_token_accounts_by_mint(
+        &distribution_token.token_address,
+        &distribution_token.token_program,
+    )? {
+        if token_account.account.owner_program != distribution_token.token_program {
+            continue;
+        }
+        let Some(ParsedAccount::TokenAccount {
+            mint,
+            owner,
+            amount,
+            ..
+        }) = token_account.account.parsed
+        else {
+            continue;
+        };
+        if mint != distribution_token.token_address {
+            continue;
+        }
+
+        existing.owners.insert(owner);
+        if parse_raw_amount(&amount).unwrap_or(0) > 0 {
+            existing.holders.insert(owner);
+        }
+    }
+
+    Ok(existing)
+}
+
+fn exclusion_reason(
     owner_wallet: &Pubkey,
     owner_account: Option<&RpcAccount>,
     source_wallet: &Pubkey,
     manual_exclude_wallets: &[Pubkey],
-    distribution_token: &TokenMetadata,
-    existing_distribution_holders: Option<&BTreeSet<Pubkey>>,
-) -> Result<Option<SkipReason>, DiscoveryError> {
+    existing_distribution_accounts: &ExistingDistributionAccounts,
+) -> Option<SkipReason> {
     if owner_wallet == source_wallet {
-        return Ok(Some(SkipReason::SourceWallet));
+        return Some(SkipReason::SourceWallet);
     }
 
     if manual_exclude_wallets.contains(owner_wallet) {
-        return Ok(Some(SkipReason::ManualExclude));
+        return Some(SkipReason::ManualExclude);
     }
 
     if !owner_wallet.is_on_curve() {
-        return Ok(Some(SkipReason::OffCurveOwner));
+        return Some(SkipReason::OffCurveOwner);
     }
 
     if let Some(owner_account) = owner_account {
         if owner_account.executable {
-            return Ok(Some(SkipReason::ExecutableOwner));
+            return Some(SkipReason::ExecutableOwner);
         }
 
         if owner_account.owner_program != system_program_id() {
-            return Ok(Some(SkipReason::ProgramOwnedOwner));
+            return Some(SkipReason::ProgramOwnedOwner);
         }
     }
 
-    if let Some(existing_distribution_holders) = existing_distribution_holders
-        && existing_distribution_holders.contains(owner_wallet)
+    if existing_distribution_accounts
+        .holders
+        .contains(owner_wallet)
     {
-        return Ok(Some(SkipReason::ExistingDistributionHolder));
+        return Some(SkipReason::ExistingDistributionHolder);
     }
 
-    if owner_has_distribution_token_account(rpc, owner_wallet, distribution_token)? {
-        return Ok(Some(SkipReason::ExistingDistributionAccount));
+    if existing_distribution_accounts.owners.contains(owner_wallet) {
+        return Some(SkipReason::ExistingDistributionAccount);
     }
 
-    Ok(None)
-}
-
-fn owner_has_distribution_token_account(
-    rpc: &impl RpcReader,
-    owner_wallet: &Pubkey,
-    distribution_token: &TokenMetadata,
-) -> Result<bool, DiscoveryError> {
-    for token_account in
-        rpc.get_token_accounts_by_owner(owner_wallet, &distribution_token.token_address)?
-    {
-        if token_account.account.owner_program != distribution_token.token_program {
-            continue;
-        }
-        let Some(ParsedAccount::TokenAccount { mint, owner, .. }) = token_account.account.parsed
-        else {
-            continue;
-        };
-        if mint == distribution_token.token_address && owner == *owner_wallet {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -728,14 +733,18 @@ mod tests {
         super::*,
         crate::rpc::{RpcAccount, RpcTokenAccount, TokenAccountBalance},
         solana_keypair::{Keypair, Signer},
-        std::collections::{HashMap, HashSet},
+        std::{
+            cell::Cell,
+            collections::{HashMap, HashSet},
+        },
     };
 
     #[derive(Default)]
     struct MockRpc {
         accounts: HashMap<Pubkey, RpcAccount>,
         largest: HashMap<Pubkey, Vec<TokenAccountBalance>>,
-        owned_token_accounts: HashMap<(Pubkey, Pubkey), Vec<RpcTokenAccount>>,
+        token_accounts_by_mint: HashMap<Pubkey, Vec<RpcTokenAccount>>,
+        token_account_scan_calls: Cell<usize>,
         account_lookup_failures: HashSet<Pubkey>,
     }
 
@@ -780,14 +789,16 @@ mod tests {
             Ok(self.largest.get(mint).cloned().unwrap_or_default())
         }
 
-        fn get_token_accounts_by_owner(
+        fn get_token_accounts_by_mint(
             &self,
-            owner: &Pubkey,
             mint: &Pubkey,
+            _token_program: &Pubkey,
         ) -> Result<Vec<RpcTokenAccount>, RpcError> {
+            self.token_account_scan_calls
+                .set(self.token_account_scan_calls.get() + 1);
             Ok(self
-                .owned_token_accounts
-                .get(&(*owner, *mint))
+                .token_accounts_by_mint
+                .get(mint)
                 .cloned()
                 .unwrap_or_default())
         }
@@ -925,7 +936,7 @@ mod tests {
         };
 
         let report =
-            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet, None).unwrap();
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet).unwrap();
 
         assert_eq!(report.recipients.len(), 1);
         assert_eq!(report.recipients[0].wallet, owner);
@@ -972,7 +983,7 @@ mod tests {
         };
 
         let report =
-            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet, None).unwrap();
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet).unwrap();
 
         assert_eq!(report.recipients.len(), 1);
         assert_eq!(report.recipients[0].wallet, owner_one);
@@ -1013,32 +1024,38 @@ mod tests {
         };
 
         let report =
-            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet, None).unwrap();
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet).unwrap();
 
         assert_eq!(report.recipients.len(), 1);
         assert_eq!(report.recipients[0].wallet, owner);
     }
 
     #[test]
-    fn uses_prefetched_distribution_holders_for_existing_holder_exclusion() {
+    fn uses_bulk_distribution_accounts_for_existing_holder_exclusion() {
         let distribution = pubkey();
         let target = pubkey();
         let source_wallet = keypair_pubkey();
         let owner = keypair_pubkey();
         let token_account_address = pubkey();
+        let distribution_holder_account = pubkey();
 
         let mut rpc = MockRpc::default();
         rpc.accounts.insert(distribution, mint_account(6));
         rpc.accounts.insert(target, mint_account(6));
         rpc.accounts.insert(owner, system_account());
+        rpc.token_accounts_by_mint.insert(
+            distribution,
+            vec![RpcTokenAccount {
+                token_account: distribution_holder_account,
+                account: token_account(distribution, owner, "1", 6),
+            }],
+        );
 
         let mut provider = MockHolderProvider::default();
         provider.holders.insert(
             target,
             vec![balance_with_owner(token_account_address, owner, "100", 6)],
         );
-        let existing_distribution_holders = BTreeSet::from([owner]);
-
         let config = ValidatedConfig {
             cluster_name: "mainnet-beta".to_owned(),
             rpc_url_env: "SOLANA_RPC_URL".to_owned(),
@@ -1054,16 +1071,11 @@ mod tests {
             },
         };
 
-        let report = discover_holders_with_provider(
-            &rpc,
-            &provider,
-            &config,
-            &source_wallet,
-            Some(&existing_distribution_holders),
-        )
-        .unwrap();
+        let report =
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet).unwrap();
 
         assert!(report.recipients.is_empty());
+        assert_eq!(rpc.token_account_scan_calls.get(), 1);
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].owner_wallet, Some(owner));
         assert_eq!(
@@ -1132,8 +1144,8 @@ mod tests {
                 balance(token_account_zero, "0", 6),
             ],
         );
-        rpc.owned_token_accounts.insert(
-            (existing_holder, distribution),
+        rpc.token_accounts_by_mint.insert(
+            distribution,
             vec![RpcTokenAccount {
                 token_account: distribution_holder_account,
                 account: token_account(distribution, existing_holder, "0", 6),
@@ -1158,6 +1170,7 @@ mod tests {
         let report = discover_holders(&rpc, &config, &source_wallet).unwrap();
 
         assert_eq!(report.recipients.len(), 1);
+        assert_eq!(rpc.token_account_scan_calls.get(), 1);
         assert_eq!(report.recipients[0].wallet, good_owner);
         assert_eq!(
             skipped_reasons(&report),
@@ -1172,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn checks_rpc_for_existing_distribution_accounts_missing_from_prefetch() {
+    fn bulk_lookup_excludes_zero_balance_distribution_accounts() {
         let distribution = pubkey();
         let target = pubkey();
         let source_wallet = keypair_pubkey();
@@ -1184,8 +1197,8 @@ mod tests {
         rpc.accounts.insert(distribution, mint_account(6));
         rpc.accounts.insert(target, mint_account(6));
         rpc.accounts.insert(owner, system_account());
-        rpc.owned_token_accounts.insert(
-            (owner, distribution),
+        rpc.token_accounts_by_mint.insert(
+            distribution,
             vec![RpcTokenAccount {
                 token_account: distribution_holder_account,
                 account: token_account(distribution, owner, "0", 6),
@@ -1197,8 +1210,6 @@ mod tests {
             target,
             vec![balance_with_owner(token_account_address, owner, "100", 6)],
         );
-        let existing_distribution_holders = BTreeSet::new();
-
         let config = ValidatedConfig {
             cluster_name: "mainnet-beta".to_owned(),
             rpc_url_env: "SOLANA_RPC_URL".to_owned(),
@@ -1214,16 +1225,11 @@ mod tests {
             },
         };
 
-        let report = discover_holders_with_provider(
-            &rpc,
-            &provider,
-            &config,
-            &source_wallet,
-            Some(&existing_distribution_holders),
-        )
-        .unwrap();
+        let report =
+            discover_holders_with_provider(&rpc, &provider, &config, &source_wallet).unwrap();
 
         assert!(report.recipients.is_empty());
+        assert_eq!(rpc.token_account_scan_calls.get(), 1);
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].owner_wallet, Some(owner));
         assert_eq!(

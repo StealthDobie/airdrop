@@ -1478,10 +1478,10 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn get_token_accounts_by_owner(
+        fn get_token_accounts_by_mint(
             &self,
-            _owner: &Pubkey,
             _mint: &Pubkey,
+            _token_program: &Pubkey,
         ) -> Result<Vec<RpcTokenAccount>, RpcError> {
             Ok(Vec::new())
         }

@@ -92,13 +92,6 @@ impl SolscanClient {
         Ok(holders)
     }
 
-    pub fn get_all_token_holders(
-        &self,
-        token_address: &Pubkey,
-    ) -> Result<Vec<TokenAccountBalance>, SolscanError> {
-        self.get_token_holders(token_address, usize::MAX)
-    }
-
     fn request_token_holders_page(
         &self,
         token_address: &Pubkey,
