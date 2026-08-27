@@ -19,6 +19,7 @@ use {
 
 const CONFIRMATION_MAX_ATTEMPTS: usize = 60;
 const CONFIRMATION_POLL_DELAY: Duration = Duration::from_secs(2);
+const CONFIRMATION_REBROADCAST_EVERY_ATTEMPTS: usize = 5;
 
 pub fn required_sol_lamports(plan: &DistributionPlan) -> u64 {
     plan.estimated_signature_fee_lamports
@@ -194,7 +195,8 @@ pub fn send_plan<R: RpcSender + RpcSimulator>(
         )?;
         progress.record_batch_submitted(batch.index, expected_signature.clone(), signature.clone());
 
-        let status = wait_for_confirmation(rpc, &signature)?;
+        let status =
+            wait_for_confirmation(rpc, batch.index, &signature, &built.encoded_transaction)?;
         if let Some(err) = status.err.clone() {
             append_batch_failure_entries(
                 plan,
@@ -237,13 +239,34 @@ pub fn send_plan<R: RpcSender + RpcSimulator>(
 
 fn wait_for_confirmation(
     rpc: &impl RpcSender,
+    batch_index: usize,
     signature: &str,
+    encoded_transaction: &str,
 ) -> Result<SignatureStatus, SendError> {
-    for _ in 0..CONFIRMATION_MAX_ATTEMPTS {
+    for attempt in 1..=CONFIRMATION_MAX_ATTEMPTS {
         if let Some(status) = rpc.get_signature_status(signature)?
             && (status.err.is_some() || signature_status_is_terminal_success(&status))
         {
             return Ok(status);
+        }
+
+        if attempt % CONFIRMATION_REBROADCAST_EVERY_ATTEMPTS == 0
+            && attempt < CONFIRMATION_MAX_ATTEMPTS
+        {
+            eprintln!(
+                "Rebroadcasting unconfirmed batch {}: signature={}",
+                batch_index + 1,
+                signature
+            );
+            match rebroadcast_transaction(rpc, batch_index, signature, encoded_transaction) {
+                Ok(()) => {}
+                Err(err @ SendError::SignatureMismatch { .. }) => return Err(err),
+                Err(err) => eprintln!(
+                    "Rebroadcast attempt for batch {} failed; continuing confirmation polling: {}",
+                    batch_index + 1,
+                    err
+                ),
+            }
         }
         sleep(CONFIRMATION_POLL_DELAY);
     }
@@ -251,6 +274,24 @@ fn wait_for_confirmation(
     Err(SendError::ConfirmationTimedOut {
         signature: signature.to_owned(),
     })
+}
+
+fn rebroadcast_transaction(
+    rpc: &impl RpcSender,
+    batch_index: usize,
+    expected_signature: &str,
+    encoded_transaction: &str,
+) -> Result<(), SendError> {
+    let returned_signature = rpc.send_transaction(encoded_transaction)?;
+    if returned_signature != expected_signature {
+        return Err(SendError::SignatureMismatch {
+            batch_index,
+            expected_signature: expected_signature.to_owned(),
+            returned_signature,
+        });
+    }
+
+    Ok(())
 }
 
 fn signature_status_is_terminal_success(status: &SignatureStatus) -> bool {
@@ -899,6 +940,33 @@ mod tests {
         );
 
         fs::remove_dir_all(run_dir).unwrap();
+    }
+
+    #[test]
+    fn rebroadcasts_the_same_signed_transaction() {
+        let rpc = NoSendRpc {
+            send_count: Cell::new(0),
+        };
+
+        rebroadcast_transaction(&rpc, 7, "unexpected-signature", "encoded-transaction").unwrap();
+
+        assert_eq!(rpc.send_count.get(), 1);
+    }
+
+    #[test]
+    fn rejects_a_mismatched_rebroadcast_signature() {
+        let rpc = NoSendRpc {
+            send_count: Cell::new(0),
+        };
+
+        let err = rebroadcast_transaction(&rpc, 7, "expected-signature", "encoded-transaction")
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SendError::SignatureMismatch { batch_index: 7, .. }
+        ));
+        assert_eq!(rpc.send_count.get(), 1);
     }
 
     #[test]
